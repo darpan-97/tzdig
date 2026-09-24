@@ -34,6 +34,7 @@
   .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; }
   .field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); flex: 1 1 280px; }
   .picker { position: relative; flex: 1 1 240px; }
+  .field.from { flex: 0 1 230px; }
   #found {
     position: absolute; z-index: 10; top: 100%; left: 0; right: 0; margin: 4px 0 0; padding: 4px;
     list-style: none; max-height: min(360px, 60vh); overflow: auto;
@@ -67,7 +68,7 @@
     border: 1px solid var(--line); color: var(--ink);
   }
   textarea { background: var(--panel); resize: vertical; }
-  pre { background: var(--code-bg); overflow: auto; white-space: pre; }
+  pre { background: var(--code-bg); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   pre.error { color: var(--warn); }
   button {
     font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
@@ -90,6 +91,9 @@
   <div class="controls">
     <label class="field">Also show these zones: a country code, a code and a city, an IANA name, or an abbreviation
       <input id="zones" type="text" spellcheck="false" autocomplete="off" placeholder="est, AU Sydney, in, Europe/Paris">
+    </label>
+    <label class="field from">Times with no zone are in
+      <input id="from" type="text" spellcheck="false" autocomplete="off" placeholder="UTC, or a zone: in, sydney">
     </label>
     <div class="field picker">
       <label for="find">Add a country or one of its zones</label>
@@ -184,6 +188,8 @@ function optionsLine() {
   let line = "#tzdig";
   const zones = $("zones").value.split(",").map((z) => z.trim().replace(/\s+/g, "_")).filter(Boolean);
   if (zones.length) line += " --in " + zones.join(",");
+  const from = $("from").value.trim().replace(/\s+/g, "_");
+  if (from) line += " --from " + from;
   if ($("json").checked) line += " --json";
   if ($("all").checked) line += " --all";
   return line;
@@ -378,6 +384,8 @@ $("zones").value = store.get("zones") ?? "est, aest";
 $("json").checked = store.get("json") === "1";
 $("all").checked = store.get("all") === "1";
 $("zones").addEventListener("input", () => { store.set("zones", $("zones").value); soon(); });
+$("from").value = store.get("from") ?? "";
+$("from").addEventListener("input", () => { store.set("from", $("from").value); soon(); });
 $("json").addEventListener("change", () => { store.set("json", $("json").checked ? "1" : "0"); soon(); });
 $("all").addEventListener("change", () => { store.set("all", $("all").checked ? "1" : "0"); soon(); });
 $("input").addEventListener("input", soon);

@@ -34,12 +34,14 @@ fn copy(src, n):
     return s
 
 fn usage(w):
-    bufw_puts(w, "usage: tzdig [--in ZONES] [--json] [--all] [--year YEAR] [VALUE ...]\n")
+    bufw_puts(w, "usage: tzdig [--in ZONES] [--from ZONE] [--json] [--all] [--year YEAR] [VALUE ...]\n")
     bufw_puts(w, "       tzdig --zones [CODE]\n")
     bufw_puts(w, "  VALUE        a timestamp; with none, the text on standard input is searched\n")
     bufw_puts(w, "  --in ZONES   also show these zones, comma-separated: a country code (au: all of\n")
     bufw_puts(w, "               Australia's zones), a city (sydney), an IANA name (Europe/Paris) or\n")
     bufw_puts(w, "               an abbreviation (est, aest)\n")
+    bufw_puts(w, "  --from ZONE  the zone of times written without one, instead of UTC: one zone,\n")
+    bufw_puts(w, "               named as for --in (in, sydney, us new york, Europe/Paris, est)\n")
     bufw_puts(w, "  --json       one JSON object per timestamp found\n")
     bufw_puts(w, "  --all        every reading of a number, not only those in 1990-2040\n")
     bufw_puts(w, "  --year YEAR  the year of dates written without one (syslog's Sep 23 15:27:40);\n")
@@ -69,7 +71,7 @@ fn read_all():
 # the options in a list of words, wherever they are; the other words are values, moved to the
 # front of the list. Returns how many values there are, or -1 after --help.
 # st: @0 flags  @4 zones  @8 1 for --vectors  @12 1 for --zones  @16 its country code, or 0
-#     @20 --year, 0 for none, -1 for one that is not a year
+#     @20 --year, 0 for none, -1 for one that is not a year   @24 --from, or 0
 fn options(words, count, st):
     let nv = 0
     let i = 0
@@ -89,6 +91,9 @@ fn options(words, count, st):
             if i + 1 < count and two_letters(load(words + (i + 1) * 4)) == 1:
                 store(st + 16, load(words + (i + 1) * 4))
                 i = i + 1
+        elif eq(a, "--from") == 1 and i + 1 < count:
+            store(st + 24, load(words + (i + 1) * 4))
+            i = i + 1
         elif eq(a, "--year") == 1 and i + 1 < count:
             store(st + 20, year_of(load(words + (i + 1) * 4)))
             i = i + 1
@@ -118,9 +123,10 @@ pub fn tzdig_copy(src, n):
 pub fn tzdig_run(words, argc):
     let w = bufw_new(1, 65536)
     let cx = tzdig_new(w)
-    let st = alloc(24)
+    let st = alloc(28)
     store(st, 0)
     store(st + 20, 0)
+    store(st + 24, 0)
     store(st + 4, 0)
     store(st + 8, 0)
     store(st + 12, 0)
@@ -185,6 +191,10 @@ pub fn tzdig_run(words, argc):
         return 0
     if load(st + 4) != 0:
         if tzdig_zones(cx, load(st + 4)) == 0:
+            bufw_flush(w)
+            return 2
+    if load(st + 24) != 0:
+        if tzdig_from(cx, load(st + 24)) == 0:
             bufw_flush(w)
             return 2
     if load(st + 8) == 1:

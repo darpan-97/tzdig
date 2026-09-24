@@ -39,7 +39,7 @@ $patterns = @{
     'x509'       = @('yyMMddHHmmssK')
     'compact'    = @('yyyyMMddHHmmss', 'yyyyMMdd_HHmmss', 'yyyyMMdd-HHmmss')
     'ymd'        = @('yyyy/M/d H:mm:ss', 'yyyy.MM.dd HH:mm:ss')
-    'mdy'        = @('M/d/yyyy h:mm:ss tt', 'M/d/yy h:mm:ss tt', 'M/d/yyyy, h:mm:ss tt', 'M/d/yy,H:mm:ss', 'M/d/yyyy h:mm tt',
+    'mdy'        = @('M/d/yyyy h:mm:ss tt', 'M/d/yyyy H:mm:ss', 'M/d/yy h:mm:ss tt', 'M/d/yyyy, h:mm:ss tt', 'M/d/yy,H:mm:ss', 'M/d/yyyy h:mm tt',
                      'M/d/yyyy H:mm', 'M-d-yyyy H:mm:ss')
     'dmy'        = @('d/M/yyyy H:mm:ss', 'd.M.yyyy H:mm:ss', 'd-M-yyyy H:mm', 'd/M/yyyy hh:mm tt', 'd/M/yyyy H:mm',
                      'd-M-yyyy H:mm:ss')
@@ -48,7 +48,7 @@ $patterns = @{
     'month-name' = @('dd MMM yyyy HH:mm:ss', 'MMM d, yyyy h:mm:ss tt', "MMMM d, yyyy 'at' h:mm:ss tt",
                      "MMM d, yyyy '@' HH:mm:ss", "MMM'.' d, yyyy HH:mm:ss", 'dd-MMM-yyyy HH:mm:ss', 'dd-MMM-yy hh.mm.ss tt',
                      'dddd, MMMM d, yyyy h:mm:ss tt', 'dddd, d MMMM yyyy h:mm:ss tt', 'MMM d yyyy HH:mm:ss', 'ddMMMyyyy HH:mm:ss',
-                     'MMM d yyyy h:mmtt', 'yyyy-MMM-dd HH:mm:ss', "ddd MMM dd yyyy HH:mm:ss 'GMT'zzz '(Eastern Daylight Time)'")
+                     'MMM d yyyy h:mmtt', 'yyyy-MMM-dd HH:mm:ss', 'd MMMM yyyy h:mm tt', "ddd MMM dd yyyy HH:mm:ss 'GMT'zzz '(Eastern Daylight Time)'")
     'ctime'      = @('ddd MMM d HH:mm:ss yyyy', "ddd MMM d HH:mm:ss 'UTC' yyyy", "MMM d HH:mm:ss yyyy 'GMT'",
                      'ddd MMM d HH:mm:ss yyyy zzz')
     'syslog'     = @('MMM d HH:mm:ss')
@@ -81,13 +81,31 @@ function Read-Text([string]$reading, [string]$text) {
         for ($y = $now.Year; $y -gt $now.Year - 8; $y--) {
             if ($t.Month -eq 2 -and $t.Day -eq 29 -and -not [DateTime]::IsLeapYear($y)) { continue }
             $c = [DateTime]::new($y, $t.Month, $t.Day, $t.Hour, $t.Minute, $t.Second, [DateTimeKind]::Utc)
-            if (($c - $now).TotalSeconds -le 172800) { return Iso $c $frac }
+            if (($c - $now).TotalSeconds -le 172800) { return In-From $c $false $frac }
         }
         return $null
     }
-    if (-not [DateTimeOffset]::TryParseExact($text, [string[]]$patterns[$reading], $inv, $styles, [ref]$o)) { return $null }
-    return Iso $o.UtcDateTime $frac
+    # one pattern at a time, to know whether the one that fits reads a zone from the text
+    foreach ($p in $patterns[$reading]) {
+        if ([DateTimeOffset]::TryParseExact($text, $p, $inv, $styles, [ref]$o)) {
+            return In-From $o.UtcDateTime ($p -cmatch "z|K|'UTC'|'GMT'") $frac
+        }
+    }
+    return $null
 }
+
+# a date read with no zone is UTC, unless a from row names a zone: then it is that zone's local time,
+# through .NET's own rules -- none for a time its clocks skip, two, earliest first, for one they repeat
+function In-From([DateTime]$t, [bool]$zoned, [string]$frac) {
+    if ($zoned -or -not $fromTz) { return Iso $t $frac }
+    $local = [DateTime]::SpecifyKind($t, 'Unspecified')
+    if ($fromTz.IsInvalidTime($local)) { return '' }
+    if ($fromTz.IsAmbiguousTime($local)) {
+        return (@($fromTz.GetAmbiguousTimeOffsets($local) | Sort-Object -Descending | ForEach-Object { Iso ($local - $_) $frac })) -join ' '
+    }
+    return Iso ($local - $fromTz.GetUtcOffset($local)) $frac
+}
+$fromTz = $null
 
 # one reading of one input, the .NET way; $null when .NET cannot represent it
 function Read-As([string]$reading, [string]$text) {
@@ -116,6 +134,10 @@ foreach ($line in Get-Content -LiteralPath $Vectors -Encoding UTF8) {
     switch ($f[0]) {
         'now' {
             $now = [DateTime]::SpecifyKind([DateTime]::ParseExact($f[1], "yyyy-MM-dd'T'HH:mm:ss'Z'", $inv), 'Utc')
+        }
+        'from' {
+            # the zone tzdig chose is Python's (zone.tab) answer; .NET checks what comes of it
+            $fromTz = if ($f[2] -eq 'UTC') { $null } else { [TimeZoneInfo]::FindSystemTimeZoneById($f[2]) }
         }
         'format' {
             if ($f[1] -match $abbr) { $skipped.abbreviation++; continue }

@@ -51,6 +51,8 @@
   button:active { transform: translateY(1px); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .status { font-size: 13px; color: var(--muted); }
+  .opt { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 14px; color: var(--muted); }
+  .opt input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
   .chips, .seg { display: flex; flex-wrap: wrap; gap: 8px; }
   .chips button, .seg button { font-size: 14px; padding: 6px 10px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
   .chips button[aria-pressed="true"], .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
@@ -99,6 +101,7 @@
     <label class="lbl" for="paste"><span>Timestamp or log text</span><span id="exampleTag" class="tag">example -- paste your own</span></label>
     <textarea id="paste" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="1727104445123, 133712345678901234, 2024-09-23T15:14:05Z, 23/Sep/2024:15:26:11 +0000, Sep 23 15:27:40, an email header, a JSON event..."></textarea>
     <div class="row"><button id="clear" type="button">Clear</button><span id="status" class="status"></span></div>
+    <label class="opt" id="localOpt" hidden><input id="local" type="checkbox"> <span>Times with no zone are this phone's time (<span id="localName"></span>)</span></label>
   </section>
 
   <div id="chips" class="chips" hidden></div>
@@ -283,7 +286,9 @@ function render() {
   let what = (FORMATS[r.format] || r.format) + ", from " + f.input;
   if (r.input_zone) what += " -- " + r.input_zone + " is read as " + offLabel(r.input_offset);
   if (r.year_given === false) what += " -- no year was given, so it is read as " + r.year + ", the latest that is not in the future";
-  if (r.zone_given === false) what += " -- no zone was given, so it is read as UTC";
+  if (r.zone_given === false) what += r.read_in
+    ? " -- no zone was written, so it is read as " + r.read_in + " time (" + offLabel(r.read_offset) + ")"
+    : " -- no zone was given, so it is read as UTC";
   if (f.readings.length > 1) what += " -- this reads " + f.readings.length + " ways; the buttons above switch between them";
   $("what").textContent = what;
 
@@ -375,7 +380,8 @@ async function update() {
   let out;
   try {
     await ready;
-    out = await runTzdig("#tzdig --json --in " + allCodes + "\n" + text);
+    const from = $("local").checked && deviceZone ? " --from " + deviceZone : "";
+    out = await runTzdig("#tzdig --json --in " + allCodes + from + "\n" + text);
   } catch (e) {
     if (mine !== gen) return;
     found = []; render();
@@ -405,6 +411,20 @@ function soon() { clearTimeout(timer); timer = setTimeout(update, 180); }
 $("paste").addEventListener("input", () => { $("exampleTag").hidden = true; soon(); });
 $("clear").addEventListener("click", () => { $("paste").value = ""; $("exampleTag").hidden = true; $("paste").focus(); update(); });
 $("q").addEventListener("input", () => { const f = found[pick]; if (f) drawList(groupsOf(f.readings[reading]), parts(f.readings[reading].utc)); });
+
+// the phone's own zone for times written with no zone -- offered only when tzdig knows that zone
+ready.then(() => {
+  const p = deviceZone && places && places.get(deviceZone);
+  if (!p) return;
+  $("localName").textContent = (p.code ? p.code + " " : "") + p.city;
+  $("localOpt").hidden = false;
+  try { $("local").checked = localStorage.getItem("tzdig.local") === "1"; } catch (e) { /* no storage: off */ }
+  if ($("local").checked) update();
+}).catch(() => {});
+$("local").addEventListener("change", () => {
+  try { localStorage.setItem("tzdig.local", $("local").checked ? "1" : "0"); } catch (e) { /* no storage */ }
+  update();
+});
 
 $("paste").value = "1727104445123";
 update();

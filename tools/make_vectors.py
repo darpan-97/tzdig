@@ -8,9 +8,11 @@ is trusted, a value they disagree on is a finding to look at, not a test to weak
 Run on Linux or WSL, where zoneinfo reads the system's IANA database:
     python3 tools/make_vectors.py > tests/vectors.tsv
 
-Six kinds of row, tab-separated:
+Seven kinds of row, tab-separated:
     now      <utc>                            "now" for the rows after it: which year a date written
                                               without one (syslog's Sep 23 15:27:40) is in
+    from     <zone as typed>   <IANA zone>    --from for the rows after it: the zone of times written
+                                              without one ("utc" to stop)
     format   <input>   <reading>   <utc> ...   the input read that way; a zone abbreviation that means
                                               several offsets gives one utc per offset, west to east
     bare     <input>   <every reading, as reading=utc, space-separated, in tzdig's order>
@@ -257,6 +259,45 @@ BARE_TEXT = [
     ("13/04/2024 10:00", [("dmy", "%d/%m/%Y %H:%M")]),
 ]
 
+def local_in(text, fmt, frac, zone):
+    """every UTC instant at which the zone's clocks show text, earliest first: two where they fall back
+    over it, none where they spring forward past it (both folds tried, each kept only if it comes back)"""
+    t = dt.datetime.strptime(cut(text, frac), fmt)
+    if t.tzinfo is not None:                                  # a zone written in the text wins
+        return [iso(int((t - EPOCH).total_seconds()), frac)]
+    z = zoneinfo.ZoneInfo(zone)
+    found = []
+    for fold in (0, 1):
+        u = t.replace(tzinfo=z, fold=fold).astimezone(UTC)
+        if u.astimezone(z).replace(tzinfo=None) == t and u not in found:
+            found.append(u)
+    return [iso(int((u - EPOCH).total_seconds()), frac) for u in sorted(found)]
+
+
+# --from: (the zone as typed, its IANA name, [(input, reading, strptime format, fraction digits)]),
+# after a "now" of 2024-10-01. Times written with no zone are that zone's local time; a zone written
+# in the text, and a number, are not affected.
+FROM = [
+    ("in", "Asia/Kolkata", [
+        ("24 September 2026 1:23 pm", "month-name", "%d %B %Y %I:%M %p", ""),
+        ("2024-09-23 20:44:05", "iso8601", "%Y-%m-%d %H:%M:%S", ""),
+        ("2024-09-23T11:14:05-04:00", "iso8601", "%Y-%m-%dT%H:%M:%S%z", ""),
+    ]),
+    ("us new york", "America/New_York", [
+        ("2024-07-04 12:00:00", "iso8601", "%Y-%m-%d %H:%M:%S", ""),
+        ("2024-11-03 01:30:00", "iso8601", "%Y-%m-%d %H:%M:%S", ""),          # shown twice: EDT, then EST
+        ("11/03/2024 01:30:00.250", "mdy", "%m/%d/%Y %H:%M:%S", "250"),
+        ("2024-03-10 02:30:00", "iso8601", "%Y-%m-%d %H:%M:%S", ""),          # skipped: no reading
+        ("Mon Sep 23 11:14:05 2024", "ctime", "%a %b %d %H:%M:%S %Y", ""),
+    ]),
+    ("au sydney", "Australia/Sydney", [
+        ("2024-04-07 02:30:00", "iso8601", "%Y-%m-%d %H:%M:%S", ""),          # shown twice: AEDT, then AEST
+        ("2024-10-06 02:30:00", "iso8601", "%Y-%m-%d %H:%M:%S", ""),          # skipped
+    ]),
+]
+# and a date with no year: its year first, as guess_year does, then the zone's local time
+FROM_YEARLESS = ("us new york", "America/New_York", "Sep 23 15:27:40", "syslog", "%b %d %H:%M:%S")
+
 # (a line of text, [the timestamps in it]), after a "now" of 2024-10-01: common log lines, and lines
 # that must give nothing.
 FIND = [
@@ -429,6 +470,19 @@ def main():
     for line, found in FIND:
         assert "\t" not in line, line
         out.write("find\t%s\t%s\n" % (line, " | ".join(found)))
+
+    # ── --from: times written with no zone, read in a zone (the now above still holds) ─────────
+    t_now = dt.datetime(2024, 10, 1, tzinfo=UTC)
+    for typed, zone, rows in FROM:
+        out.write("from\t%s\t%s\n" % (typed, zone))
+        for text, reading, fmt, frac in rows:
+            out.write("format\t%s\t%s\t%s\n" % (text, reading, " ".join(local_in(text, fmt, frac, zone))))
+        if typed == FROM_YEARLESS[0]:
+            _, _, text, reading, fmt = FROM_YEARLESS
+            y = guess_year(t_now, text, fmt)
+            out.write("format\t%s\t%s\t%s\n" % (text, reading, " ".join(local_in("%d %s" % (y, text), "%Y " + fmt, "", zone))))
+            out.write("format\t1727104445\tunix-s\t%s\n" % READ["unix-s"](1727104445))
+    out.write("from\tutc\tUTC\n")
 
 
 if __name__ == "__main__":

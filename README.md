@@ -30,6 +30,7 @@ tzdig 1727104445123                       a value, in UTC
 tzdig 1727104445123 --in est,aest         and in other zones
 tzdig 1727104445123 --in au               and in every zone of a country
 tzdig "03/04/2024 10:00"                  a date that reads two ways shows both
+tzdig "24 Sep 2026 1:23 pm" --from in     a time with no zone, read as India's time
 tzdig --in est < app.log                  every timestamp in a file
 Get-Content app.log | tzdig --in est      the same in PowerShell
 tzdig --json 133712345678901234           JSON output
@@ -64,8 +65,11 @@ When a value can be read more than one way, every reading is shown:
 - a zone abbreviation with several meanings: `IST` (Ireland, Israel, India), `CST` (US, Cuba,
   China), `CDT` (US, Cuba), `PST` (US, Philippines)
 
-A time with no zone is read as UTC, and a date with no year as the latest year that is not in the
-future; the output says so. Not read: a date without a time, a time without a date, relative times
+A time with no zone is read as UTC, unless `--from` names the zone it is in (on the web page, the
+"Times with no zone are in" box; on the phone page, a switch for the phone's own zone). A time the
+clocks show twice as they fall back gets both readings, and one they skip is said not to exist. A
+date with no year is read as the latest year that is not in the future. The output says each time
+which of these it assumed. Not read: a date without a time, a time without a date, relative times
 ("5 minutes ago") and month names in other languages.
 
 ## Zones

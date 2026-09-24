@@ -32,9 +32,11 @@ import zones
 #   @216 --year (0: none)   @220 the offset a reading used   @224 @228 @232 where the last month name,
 #   number and AM/PM ended   @236 how many records the zone table has   @240 the meanings (8 offsets)
 #   @272 every abbreviation the zone table uses (abbr_list)   @276 how many
+#   @280 --from: the zone name (its number) that times written without a zone are in, -1 for UTC
+#   @284 1 when the date read is a time --from's clocks skip, so it has no reading
 
 pub fn tzdig_new(w):
-    let cx = alloc(280)
+    let cx = alloc(288)
     store(cx, w)
     store(cx + 4, 0)
     store(cx + 8, alloc(4 * 600))
@@ -54,6 +56,7 @@ pub fn tzdig_new(w):
     store(cx + 236, 0)
     store(cx + 272, 0)
     store(cx + 276, 0)
+    store(cx + 280, 0 - 1)
     return cx
 
 pub fn tzdig_set_flags(cx, f):
@@ -473,6 +476,7 @@ fn date_clear(cx):
     store(cx + 188, 0)
     store(cx + 200, 0)
     store(cx + 204, 0)
+    store(cx + 284, 0)
     return 0
 
 fn word_len(s, p, e):                         # how many letters at p
@@ -1266,6 +1270,24 @@ fn guess_year(cx, mo, d):
         k = k + 1
     return 0 - 1
 
+# the offset of the m-th reading of local time lt in zone name zi (--from), earliest instant first: a
+# time the zone's clocks show once has one, a time they show twice as they fall back has two, and a
+# time they skip as they spring forward has none (99999), as has one outside the table's years. The
+# offsets that fit go to cx+240, as an abbreviation's meanings do.
+fn from_offset(cx, zi, lt: i64, m):
+    let z = zone_obj(cx, zrecord(cx, zi))
+    store(cx + 204, 0)
+    let k = 0
+    while k < load(z):
+        let off = load(load(z + 4) + k * 4)
+        let ty = zone_type(z, lt - i64(off))
+        if ty >= 0 and load(load(z + 4) + ty * 4) == off:
+            add_meaning(cx, 0 - off)          # kept smallest first: the largest offset, the earliest instant
+        k = k + 1
+    if m >= load(cx + 204):
+        return 99999
+    return 0 - load(cx + 240 + m * 4)
+
 # reading r of the date just read: r / 8 is the order (1: the day and the month the other way round),
 # r % 8 which meaning of its zone abbreviation. Puts the instant in the context; 0 when that reading
 # does not exist or is not a real date.
@@ -1275,25 +1297,34 @@ fn date_applies(cx, r):
     if order == 1 and load(cx + 200) == 0:
         return 0
     let zk = load(cx + 184)
-    if (zk == 2 and m >= load(cx + 204)) or (zk != 2 and m > 0):
+    let fz = load(cx + 280)
+    if zk == 0 and fz >= 0:
+        if m >= 2:                            # a clock that falls back gives a time twice
+            return 0
+    elif (zk == 2 and m >= load(cx + 204)) or (zk != 2 and m > 0):
         return 0
     let mo = load(cx + 148)
     let d = load(cx + 152)
     if order == 1:
         mo = load(cx + 152)
         d = load(cx + 148)
-    let off = 0
-    if zk == 1:
-        off = load(cx + 188)
-    if zk == 2:
-        off = load(cx + 240 + m * 4)
-    store(cx + 220, off)
     let y = load(cx + 144)
     if y < 0:
         y = guess_year(cx, mo, d)
     if y < 1:
         return 0
     store(cx + 172, y)
+    let off = 0
+    if zk == 1:
+        off = load(cx + 188)
+    if zk == 2:
+        off = load(cx + 240 + m * 4)
+    if zk == 0 and fz >= 0:
+        let lt = i64(days_from_civil(y, mo, d)) * i64(86400) + i64(load(cx + 156) * 3600 + load(cx + 160) * 60 + load(cx + 164))
+        off = from_offset(cx, fz, lt, m)
+        if off == 99999:
+            return 0
+    store(cx + 220, off)
     if set_civil(cx, y, mo, d, load(cx + 156), load(cx + 160), load(cx + 164), off) == 0:
         return 0
     store64(cx + 72, load64(cx + 176))
@@ -1320,6 +1351,16 @@ fn date_check(cx, q):
         if date_applies(cx, r) == 1:
             return q
         r = r + 1
+    # none: but a time with no zone that --from's clocks skip (02:30 as New York springs forward)
+    # is still a date, and is shown saying so rather than dropped as not a timestamp
+    if load(cx + 184) == 0 and load(cx + 280) >= 0:
+        let keep = load(cx + 280)
+        store(cx + 280, 0 - 1)
+        let any = date_applies(cx, 0) + date_applies(cx, 8)
+        store(cx + 280, keep)
+        if any > 0:
+            store(cx + 284, 1)
+            return q
     return 0 - 1
 
 # a date and a time at p, in any of the families above, a weekday before it or not. Fills the date
@@ -1726,6 +1767,58 @@ pub fn tzdig_zones(cx, spec):
             p = p + 1
     return ok
 
+# --from ZONE: the zone of every time written without one, which is otherwise read as UTC. It names
+# ONE zone: a country with several ("us", "au") or an abbreviation that stands for several ("aest":
+# Sydney and Brisbane) is refused with the zones it could be, since picking one would be a guess.
+# 1, or 0 after saying why not.
+pub fn tzdig_from(cx, spec):
+    let n = slen(spec)
+    let a = skip_spaces(spec, 0, n)
+    let b = n
+    while b > a and u8(spec + b - 1) == 32:
+        b = b - 1
+    if b > a and (same(spec + a, b - a, "utc") == 1 or same(spec + a, b - a, "gmt") == 1 or same(spec + a, b - a, "z") == 1):
+        store(cx + 280, 0 - 1)
+        return 1
+    # chosen into a list of its own, so the zones to show are left as they are
+    let shown = load(cx + 8)
+    let count = load(cx + 12)
+    let list = alloc(4 * 600)
+    store(cx + 8, list)
+    store(cx + 12, 0)
+    let ok = 0
+    if b > a:
+        ok = add_named(cx, spec + a, b - a)
+    let got = load(cx + 12)
+    store(cx + 8, shown)
+    store(cx + 12, count)
+    if ok == 1 and got == 1:
+        store(cx + 280, load(list))
+        return 1
+    put(cx, "tzdig: --from takes one zone")
+    if ok == 1 and got > 1:
+        put(cx, ", and '")
+        put_n(cx, spec + a, b - a)
+        put(cx, "' is ")
+        put_digits(cx, i64(got), 1)
+        put(cx, ": ")
+        let k = 0
+        while k < got and k < 4:
+            if k > 0:
+                put(cx, ", ")
+            put_label(cx, load(list + k * 4), 0)
+            k = k + 1
+        if got > 4:
+            put(cx, ", ...")
+        put(cx, " -- name one, as in 'au sydney'")
+    else:
+        put(cx, ": there is no zone called '")
+        put_n(cx, spec + a, b - a)
+        put(cx, "'")
+    put(cx, "\n")
+    store(cx + 36, load(cx + 36) + 1)
+    return 0
+
 # "AU Sydney": the country code, when the name has one, and the city
 fn label_len(cx, i):
     let n = slen(city(zname(cx, i)))
@@ -1920,7 +2013,13 @@ fn put_reading_name(cx, kind, r):
     if load(cx + 144) < 0:
         put(cx, ", no year given: read as ")
         put_digits(cx, i64(load(cx + 172)), 1)
-    if load(cx + 184) == 0:
+    if load(cx + 184) == 0 and load(cx + 280) >= 0:
+        put(cx, ", no zone written: read as ")
+        put_label(cx, load(cx + 280), 0)
+        put(cx, " time (")
+        put_offset(cx, load(cx + 220), 1)
+        put(cx, ")")
+    elif load(cx + 184) == 0:
         put(cx, ", no zone given: read as UTC")
     return 0
 
@@ -1936,6 +2035,12 @@ fn show_reading_json(cx, kind, r):
     if kind == 4:
         if load(cx + 184) == 0:
             put(cx, ",\"zone_given\":false")
+        if load(cx + 184) == 0 and load(cx + 280) >= 0:
+            put(cx, ",\"read_in\":\"")
+            put(cx, zname(cx, load(cx + 280)))
+            put(cx, "\",\"read_offset\":\"")
+            put_offset(cx, load(cx + 220), 0)
+            putc(cx, 34)
         if load(cx + 144) < 0:
             put(cx, ",\"year_given\":false,\"year\":")
             put_digits(cx, i64(load(cx + 172)), 1)
@@ -2025,12 +2130,19 @@ fn is_marker(cx, kind, single):
             return 1
     return 0
 
+# a time with no zone that --from's clocks skip (see date_check): no reading, but worth saying so
+fn is_skipped(cx, kind):
+    if kind == 4 and load(cx + 284) == 1:
+        return 1
+    return 0
+
 fn show_token(cx, s, a, b, kind, single):
     let json = load(cx + 4) & 1
     let set = reading_set(cx, kind, single)
     let count = count_bits(set)
     let marker = is_marker(cx, kind, single)
-    if count == 0 and single == 0 and marker == 0:
+    let skipped = is_skipped(cx, kind)
+    if count == 0 and single == 0 and marker == 0 and skipped == 0:
         return 0
     if json == 1:
         put(cx, "{\"input\":")
@@ -2040,6 +2152,10 @@ fn show_token(cx, s, a, b, kind, single):
             put_digits(cx, i64(load(cx + 32)), 1)
         if marker == 1:
             put(cx, ",\"note\":\"Active Directory marker: never / not set\"")
+        if skipped == 1:
+            put(cx, ",\"note\":\"does not exist in ")
+            put(cx, zname(cx, load(cx + 280)))
+            put(cx, ": its clocks skip over it\"")
         put(cx, ",\"readings\":[")
         let first = 1
         let r = 0
@@ -2061,6 +2177,11 @@ fn show_token(cx, s, a, b, kind, single):
     put(cx, "   ")
     if marker == 1:
         put(cx, "Active Directory marker: never / not set\n")
+        return 1
+    if skipped == 1:
+        put(cx, "does not exist in ")
+        put_label(cx, load(cx + 280), 0)
+        put(cx, " time: its clocks skip over it\n")
         return 1
     if count == 0:
         put(cx, "no reading lands between 1990 and 2040 (--all shows every reading)\n")
@@ -2146,7 +2267,7 @@ fn text_next(cx, s, p, e):
             if q >= 0 and kind != 0 and isalnum(after) == 1:
                 q = 0 - 1
             if q > i:
-                if is_marker(cx, kind, 0) == 1 or reading_set(cx, kind, 0) != 0:
+                if is_marker(cx, kind, 0) == 1 or is_skipped(cx, kind) == 1 or reading_set(cx, kind, 0) != 0:
                     store(sc + 48, i)
                     store(sc + 56, kind)
                     return q
@@ -2203,6 +2324,7 @@ fn field(s, p, e):                            # end of the tab-separated field s
 
 # The rows, as tools/make_vectors.py writes them:
 #   now      <utc>                        "now" for the rows after it: the year of a date without one
+#   from     <zone>  <IANA zone>          --from for the rows after it, and the zone it chose ("utc" to stop)
 #   format   <input>  <reading>  <utc>    the input read that way (several utcs when it means several)
 #   bare     <input>  <reading=utc ...>   every reading (a number's: those in 1990-2040)
 #   zone     <utc>  <IANA zone>  <local time>  <offset>  <abbreviation>
@@ -2249,6 +2371,18 @@ pub fn tzdig_vectors(cx, s):
             putc(cx, 10)
             if scan_date(cx, s, f1 + 1, f2) == f2 and date_applies(cx, 0) == 1:
                 store64(cx + 208, load64(cx + 64))
+        elif same(kind, f1 - p, "from") == 1:
+            put_n(cx, s + p, f2 - p)
+            putc(cx, 9)
+            let fzs = alloc(f2 - f1)
+            mem_copy(fzs, s + f1 + 1, f2 - f1 - 1)
+            store8(fzs + f2 - f1 - 1, 0)
+            if tzdig_from(cx, fzs) == 1:
+                if load(cx + 280) >= 0:
+                    put(cx, zname(cx, load(cx + 280)))
+                else:
+                    put(cx, "UTC")
+            putc(cx, 10)
         elif same(kind, f1 - p, "zone") == 1:
             put_n(cx, s + p, f3 - p)
             putc(cx, 9)
