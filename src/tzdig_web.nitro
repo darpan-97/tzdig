@@ -1,0 +1,7 @@
+import tzdig_run
+
+# tzdig, for the builds that have no command line (JavaScript, wasm, the web page): the input is all
+# on standard input, with the options on a first line "#tzdig --in est,aest --json" when there are any.
+# It never asks the host for arguments, which a browser build has no way to answer.
+
+tzdig_run(0, 0)

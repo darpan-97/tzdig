@@ -1,0 +1,2299 @@
+module tzdig_core
+
+# tzdig_core -- every timestamp in a piece of text, read every way it can be read, and shown in UTC
+# and in the zones asked for. Pure: text in, text out through a writer. No clock, no files and no host
+# time zone API, so every build of it -- nirvm, the C binary, JavaScript, wasm -- gives the same answer.
+#
+# An instant is a count of seconds since 1970 (i64, negative before it) plus the fraction digits the
+# input carried, kept as an integer and a digit count, so 7 FILETIME digits come back as 7 digits.
+
+import std
+import std_io
+import clock
+import inflate
+import crc32
+import zones
+
+# ---- the context: one block, since nitro has no tuples -------------------------------------------
+#   @0 writer   @4 flags (1 json, 2 all)   @8 zones to show (name numbers)   @12 how many
+#   @16 names   @20 name count   @24 zone objects by record   @28 scratch   @32 line number, 0 = one
+#   value   @36 errors
+#   @40 number: integer part (i64)   @48 fraction (i64)   @56 fraction digits   @60 integer digits
+#   @64 instant: seconds (i64)   @72 fraction (i64)   @80 fraction digits   @84 1 if no zone was given
+#   @88 1990-01-01 (i64)   @96 2041-01-01 (i64)   @104 year 1 (i64)   @112 year 10000 (i64)
+#   @120 the start of each record line   @124 the record number of each zone name
+#   @128 the country code of each zone name ("-" for none)   @132 the country lines   @136 how many
+# A date in text, as scan_date read it (see there):
+#   @140 family   @144 year (-1: none given)   @148 month   @152 day   @156 hour   @160 minute
+#   @164 second   @168 fraction digits   @172 the year a reading used   @176 fraction (i64)
+#   @184 zone: 0 none given, 1 an offset, 2 an abbreviation   @188 the offset (seconds east)
+#   @192 the abbreviation, in the text   @196 its length   @200 1 if the day and month can be either
+#   way round   @204 how many meanings the abbreviation has   @208 now (i64, 0: no clock)
+#   @216 --year (0: none)   @220 the offset a reading used   @224 @228 @232 where the last month name,
+#   number and AM/PM ended   @236 how many records the zone table has   @240 the meanings (8 offsets)
+#   @272 every abbreviation the zone table uses (abbr_list)   @276 how many
+
+pub fn tzdig_new(w):
+    let cx = alloc(280)
+    store(cx, w)
+    store(cx + 4, 0)
+    store(cx + 8, alloc(4 * 600))
+    store(cx + 12, 0)
+    store(cx + 16, 0)
+    store(cx + 20, 0)
+    store(cx + 24, 0)
+    store(cx + 28, alloc(64))
+    store(cx + 32, 0)
+    store(cx + 36, 0)
+    store64(cx + 88, i64(days_from_civil(1990, 1, 1)) * i64(86400))
+    store64(cx + 96, i64(days_from_civil(2041, 1, 1)) * i64(86400))
+    store64(cx + 104, i64(days_from_civil(1, 1, 1)) * i64(86400))
+    store64(cx + 112, i64(days_from_civil(10000, 1, 1)) * i64(86400))
+    store64(cx + 208, i64(0))
+    store(cx + 216, 0)
+    store(cx + 236, 0)
+    store(cx + 272, 0)
+    store(cx + 276, 0)
+    return cx
+
+pub fn tzdig_set_flags(cx, f):
+    store(cx + 4, f)
+    return 0
+
+# now, in Unix seconds: which year a date written without one (syslog's "Sep 23 15:27:40") is in.
+# The core has no clock of its own; the command line and the web page pass the host's.
+pub fn tzdig_set_now(cx, t: i64):
+    store64(cx + 208, t)
+    return 0
+
+# --year: the year of every date written without one, instead of working it out from now
+pub fn tzdig_set_year(cx, y):
+    store(cx + 216, y)
+    return 0
+
+pub fn tzdig_errors(cx):
+    return load(cx + 36)
+
+# ---- dates ---------------------------------------------------------------------------------------
+
+fn fdiv64(a: i64, b: i64) -> i64:            # floor division for b > 0: before 1970 is negative
+    let q = a / b
+    if q * b > a:
+        q = q - i64(1)
+    return q
+
+fn days_from_civil(y, m, d):                  # Howard Hinnant's, the inverse of lib/clock's
+    let yy = y
+    let mp = m - 3
+    if m <= 2:
+        yy = y - 1
+        mp = m + 9
+    let era = clock_fdiv(yy, 400)
+    let yoe = yy - era * 400
+    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * mp + 2) / 5 + d - 1 - 719468
+
+fn days_in_month(y, m):
+    if m == 2:
+        if clock_fmod(y, 4) == 0 and (clock_fmod(y, 100) != 0 or clock_fmod(y, 400) == 0):
+            return 29
+        return 28
+    if m == 4 or m == 6 or m == 9 or m == 11:
+        return 30
+    return 31
+
+fn set_instant(cx, sec: i64, frac: i64, fd):
+    store64(cx + 64, sec)
+    store64(cx + 72, frac)
+    store(cx + 80, fd)
+    store(cx + 84, 0)
+    return 1
+
+# ---- output --------------------------------------------------------------------------------------
+
+fn put(cx, s):
+    bufw_puts(load(cx), s)
+    return 0
+
+fn putc(cx, c):
+    bufw_putc(load(cx), c)
+    return 0
+
+fn put_digits(cx, v: i64, width):             # v >= 0, zero-padded to at least width digits
+    let sc = load(cx + 28)
+    let n = 0
+    let x = v
+    while n < width or x > i64(0):
+        store8(sc + n, 48 + i32(x - (x / i64(10)) * i64(10)))
+        x = x / i64(10)
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        putc(cx, u8(sc + n))
+    return 0
+
+# "2024-09-23 15:14:05.123", with sep 84 ('T') and a Z for the vectors and JSON
+fn put_time(cx, sec: i64, frac: i64, fd, sep, zulu):
+    let days = fdiv64(sec, i64(86400))
+    let sod = i32(sec - days * i64(86400))
+    let z = i32(days)
+    put_digits(cx, i64(clock_year(z)), 4)
+    putc(cx, 45)
+    put_digits(cx, i64(clock_month(z)), 2)
+    putc(cx, 45)
+    put_digits(cx, i64(clock_day(z)), 2)
+    putc(cx, sep)
+    put_digits(cx, i64(sod / 3600), 2)
+    putc(cx, 58)
+    put_digits(cx, i64((sod / 60) - (sod / 3600) * 60), 2)
+    putc(cx, 58)
+    put_digits(cx, i64(sod - (sod / 60) * 60), 2)
+    if fd > 0:
+        putc(cx, 46)
+        put_digits(cx, frac, fd)
+    if zulu == 1:
+        putc(cx, 90)
+    return 0
+
+fn put_offset(cx, off, human):                # "+10:00", or for people "UTC+10" / "UTC+5:30"
+    let a = off
+    if human == 1:
+        put(cx, "UTC")
+    if a < 0:
+        putc(cx, 45)
+        a = 0 - a
+    else:
+        putc(cx, 43)
+    if human == 1:
+        put_digits(cx, i64(a / 3600), 1)
+        if (a / 60) - (a / 3600) * 60 != 0:
+            putc(cx, 58)
+            put_digits(cx, i64((a / 60) - (a / 3600) * 60), 2)
+        return 0
+    put_digits(cx, i64(a / 3600), 2)
+    putc(cx, 58)
+    put_digits(cx, i64((a / 60) - (a / 3600) * 60), 2)
+    return 0
+
+fn put_json_str(cx, s, n):                    # a JSON string: quotes, backslashes and controls escaped
+    putc(cx, 34)
+    let i = 0
+    while i < n:
+        let c = u8(s + i)
+        if c == 34 or c == 92:
+            putc(cx, 92)
+            putc(cx, c)
+        elif c < 32:
+            put(cx, "\\u00")
+            putc(cx, 48 + c / 16)
+            let lo = c - (c / 16) * 16
+            if lo < 10:
+                putc(cx, 48 + lo)
+            else:
+                putc(cx, 87 + lo)
+        else:
+            putc(cx, c)
+        i = i + 1
+    putc(cx, 34)
+    return 0
+
+fn put_n(cx, s, n):
+    let i = 0
+    while i < n:
+        putc(cx, u8(s + i))
+        i = i + 1
+    return 0
+
+# ---- characters ----------------------------------------------------------------------------------
+
+fn isdig(c):
+    if c >= 48 and c <= 57:
+        return 1
+    return 0
+
+fn isalpha(c):
+    if (c >= 65 and c <= 90) or (c >= 97 and c <= 122):
+        return 1
+    return 0
+
+fn isalnum(c):
+    if isdig(c) == 1 or isalpha(c) == 1:
+        return 1
+    return 0
+
+fn lower(c):
+    if c >= 65 and c <= 90:
+        return c + 32
+    return c
+
+fn ishex(c):
+    if isdig(c) == 1 or (lower(c) >= 97 and lower(c) <= 102):
+        return 1
+    return 0
+
+fn digits(s, p, e, k):                        # exactly k digits at p, or -1
+    if p + k > e:
+        return 0 - 1
+    let v = 0
+    let i = 0
+    while i < k:
+        let c = u8(s + p + i)
+        if isdig(c) == 0:
+            return 0 - 1
+        v = v * 10 + c - 48
+        i = i + 1
+    return v
+
+# case-insensitive compare of s[0..n) with the NUL-terminated t; '_' and ' ' count as the same
+fn same(s, n, t):
+    let i = 0
+    while i < n:
+        let a = lower(u8(s + i))
+        let b = lower(u8(t + i))
+        if a == 95:
+            a = 32
+        if b == 95:
+            b = 32
+        if b == 0 or a != b:
+            return 0
+        i = i + 1
+    if u8(t + n) != 0:
+        return 0
+    return 1
+
+# ---- readings of a number ------------------------------------------------------------------------
+# The order is the order they are listed in when a number could be several of them.
+
+pub fn tzdig_reading_count(): return 9
+
+fn reading_id(r):
+    if r == 0: return "unix-s"
+    if r == 1: return "unix-ms"
+    if r == 2: return "unix-us"
+    if r == 3: return "unix-ns"
+    if r == 4: return "filetime"
+    if r == 5: return "webkit"
+    if r == 6: return "cocoa"
+    if r == 7: return "excel"
+    return "dotnet"
+
+fn reading_name(r):
+    if r == 0: return "unix seconds"
+    if r == 1: return "unix milliseconds"
+    if r == 2: return "unix microseconds"
+    if r == 3: return "unix nanoseconds"
+    if r == 4: return "Windows FILETIME"
+    if r == 5: return "Chrome/WebKit time"
+    if r == 6: return "Apple/Cocoa time"
+    if r == 7: return "Excel date"
+    return ".NET ticks"
+
+fn pow10(k) -> i64:
+    let v = i64(1)
+    let i = 0
+    while i < k:
+        v = v * i64(10)
+        i = i + 1
+    return v
+
+# Reads the number held in the context the way reading r says, into the context's instant.
+# 0 when that reading does not apply: a fraction on a whole-number format, an Excel date outside a
+# single value, or a result outside years 1 to 9999.
+fn read_as(cx, r, single):
+    let n = load64(cx + 40)
+    let f = load64(cx + 48)
+    let fdl = load(cx + 56)
+    let from1601 = i64(11644473600)
+    if r == 0:
+        set_instant(cx, n, f, fdl)
+    elif r == 6:
+        set_instant(cx, n + i64(978307200), f, fdl)
+    elif r == 7:
+        if single == 0:
+            return 0
+        let sod = i64(0)
+        if fdl > 0:
+            sod = (f * i64(86400) + pow10(fdl) / i64(2)) / pow10(fdl)
+        set_instant(cx, (n - i64(25569)) * i64(86400) + sod, i64(0), 0)
+    elif fdl > 0:
+        return 0
+    elif r == 1:
+        set_instant(cx, n / i64(1000), n - (n / i64(1000)) * i64(1000), 3)
+    elif r == 2:
+        set_instant(cx, n / pow10(6), n - (n / pow10(6)) * pow10(6), 6)
+    elif r == 3:
+        set_instant(cx, n / pow10(9), n - (n / pow10(9)) * pow10(9), 9)
+    elif r == 4:
+        set_instant(cx, n / pow10(7) - from1601, n - (n / pow10(7)) * pow10(7), 7)
+    elif r == 8:                              # .NET's DateTime.Ticks: 100 ns since 0001-01-01
+        set_instant(cx, n / pow10(7) - i64(62135596800), n - (n / pow10(7)) * pow10(7), 7)
+    else:
+        set_instant(cx, n / pow10(6) - from1601, n - (n / pow10(6)) * pow10(6), 6)
+    let sec = load64(cx + 64)
+    if sec < load64(cx + 104) or sec >= load64(cx + 112):
+        return 0
+    return 1
+
+fn in_window(cx):
+    let sec = load64(cx + 64)
+    if sec >= load64(cx + 88) and sec < load64(cx + 96):
+        return 1
+    return 0
+
+# ---- tokens: where a timestamp starts and ends ---------------------------------------------------
+
+# A number: digits, and a fraction after a point. Returns its end, or -1. Up to 19 integer digits
+# (the most an i64 holds); fraction digits past 9 are read and dropped.
+fn scan_number(cx, s, p, e):
+    let q = p
+    let n = i64(0)
+    while q < e and isdig(u8(s + q)) == 1:
+        if q - p >= 19:
+            return 0 - 1
+        n = n * i64(10) + i64(u8(s + q) - 48)
+        q = q + 1
+    if q - p == 19 and n < i64(0):
+        return 0 - 1
+    store64(cx + 40, n)
+    store(cx + 60, q - p)
+    store64(cx + 48, i64(0))
+    store(cx + 56, 0)
+    if q + 1 < e and u8(s + q) == 46 and isdig(u8(s + q + 1)) == 1:
+        q = q + 1
+        let f = i64(0)
+        let k = 0
+        while q < e and isdig(u8(s + q)) == 1:
+            if k < 9:
+                f = f * i64(10) + i64(u8(s + q) - 48)
+                k = k + 1
+            q = q + 1
+        store64(cx + 48, f)
+        store(cx + 56, k)
+    return q
+
+# 0x followed by 15 or 16 hex digits: a FILETIME as registry and PowerShell print it; or by 8, a Unix
+# time in seconds as the registry keeps InstallDate and a program's header its build time. How many
+# digits at cx+60.
+fn scan_hex(cx, s, p, e):
+    if p + 2 >= e or u8(s + p) != 48 or lower(u8(s + p + 1)) != 120:
+        return 0 - 1
+    let q = p + 2
+    let n = i64(0)
+    while q < e and ishex(u8(s + q)) == 1:
+        let c = lower(u8(s + q))
+        let v = c - 48
+        if c >= 97:
+            v = c - 87
+        n = n * i64(16) + i64(v)
+        q = q + 1
+        if q - p > 18:
+            return 0 - 1
+    if (q - p != 10 and q - p < 17) or n < i64(0):
+        return 0 - 1
+    store64(cx + 40, n)
+    store64(cx + 48, i64(0))
+    store(cx + 56, 0)
+    store(cx + 60, q - p - 2)
+    return q
+
+# the date and time in fields, converted with an offset in seconds (local = UTC + offset)
+fn set_civil(cx, y, mo, d, h, mi, sec, off):
+    if mo < 1 or mo > 12 or d < 1 or d > days_in_month(y, mo) or h > 23 or mi > 59 or sec > 59:
+        return 0
+    let t = i64(days_from_civil(y, mo, d)) * i64(86400) + i64(h * 3600 + mi * 60 + sec) - i64(off)
+    store64(cx + 64, t)
+    return 1
+
+# ---- dates in text -------------------------------------------------------------------------------
+# One scanner for every way logs and exports write a date with a time. It reads the fields, and the
+# family the layout belongs to; which reading the fields have -- the day and the month which way
+# round, what a zone abbreviation means, which year a date written without one is in -- is worked out
+# by date_applies, so a date that can be read two ways is shown both ways, never one picked silently.
+#    1 ISO 8601      2024-09-23T15:14:05Z, 2024-09-23 11:14:05 -0400, 20240923T151405Z, 2024-W39-1, 2024-267
+#    2 email date    Mon, 23 Sep 2024 11:14:05 -0400 (a day, a month's name and a year, and a zone)
+#    3 web server    23/Sep/2024:15:26:11 +0000
+#    4 syslog        Sep 23 15:27:40 (no year: see guess_year)
+#    5 Unix date     Mon Sep 23 15:14:05 UTC 2024, Sep 23 15:14:05 2024 GMT (the year after the time)
+#    6 month name    Sep 23, 2024 3:14:05 PM, 23-Sep-2024 15:14:05, 23 Sep 2024 15:14:05,123
+#    7 year first    2024/09/23 15:25:03, 2024.09.23 15:14:05
+#    8 month first   9/23/2024 3:14:05 PM -- and read as 9, day first, too when both are 12 or under
+#    9 day first     23/09/2024 15:14:05, 23.09.2024 15:14:05
+#   10 LDAP          20240923151405.0Z (Active Directory's whenCreated)
+#   11 certificate   240923151405Z (X.509's UTCTime)
+#   12 compact       20240923151405, 20240923_151405
+#   13 klog          I0923 15:14:05.123456 (Kubernetes; no year)
+#   14 logcat        09-23 15:14:05.123 (Android; no year)
+
+fn family_id(f):
+    if f == 1: return "iso8601"
+    if f == 2: return "rfc2822"
+    if f == 3: return "clf"
+    if f == 4: return "syslog"
+    if f == 5: return "ctime"
+    if f == 6: return "month-name"
+    if f == 7: return "ymd"
+    if f == 8: return "mdy"
+    if f == 9: return "dmy"
+    if f == 10: return "ldap"
+    if f == 11: return "x509"
+    if f == 12: return "compact"
+    if f == 13: return "klog"
+    return "logcat"
+
+fn family_name(f):
+    if f == 1: return "ISO 8601"
+    if f == 2: return "email date"
+    if f == 3: return "web server log time"
+    if f == 4: return "syslog time"
+    if f == 5: return "Unix date"
+    if f == 6: return "date with a month name"
+    if f == 7: return "year/month/day date"
+    if f == 8: return "month/day/year date"
+    if f == 9: return "day/month/year date"
+    if f == 10: return "LDAP time (Active Directory)"
+    if f == 11: return "certificate time (UTCTime)"
+    if f == 12: return "compact date and time"
+    if f == 13: return "Kubernetes log time"
+    return "Android logcat time"
+
+fn set_date(cx, f, y, mo, d):
+    store(cx + 140, f)
+    store(cx + 144, y)
+    store(cx + 148, mo)
+    store(cx + 152, d)
+    return 0
+
+fn date_clear(cx):
+    set_date(cx, 0, 0 - 1, 0, 0)
+    store(cx + 156, 0)
+    store(cx + 160, 0)
+    store(cx + 164, 0)
+    store(cx + 168, 0)
+    store64(cx + 176, i64(0))
+    store(cx + 184, 0)
+    store(cx + 188, 0)
+    store(cx + 200, 0)
+    store(cx + 204, 0)
+    return 0
+
+fn word_len(s, p, e):                         # how many letters at p
+    let n = 0
+    while p + n < e and isalpha(u8(s + p + n)) == 1:
+        n = n + 1
+    return n
+
+fn same_n(x, y, n):                           # x[0..n) and y[0..n), ignoring case
+    let i = 0
+    while i < n:
+        if lower(u8(x + i)) != lower(u8(y + i)):
+            return 0
+        i = i + 1
+    return 1
+
+fn month_of(s, p, e):                         # "Jan".."Dec" at p, case-insensitive, 1..12 or 0
+    if p + 3 > e:
+        return 0
+    let names = "janfebmaraprmayjunjulaugsepoctnovdec"
+    let m = 0
+    while m < 12:
+        if lower(u8(s + p)) == u8(names + m * 3) and lower(u8(s + p + 1)) == u8(names + m * 3 + 1) and lower(u8(s + p + 2)) == u8(names + m * 3 + 2):
+            return m + 1
+        m = m + 1
+    return 0
+
+fn month_full(m):
+    if m == 1: return "january"
+    if m == 2: return "february"
+    if m == 3: return "march"
+    if m == 4: return "april"
+    if m == 5: return "may"
+    if m == 6: return "june"
+    if m == 7: return "july"
+    if m == 8: return "august"
+    if m == 9: return "september"
+    if m == 10: return "october"
+    if m == 11: return "november"
+    return "december"
+
+# a month's name at p -- Sep, Sept, September, SEP, Sep. -- as 1..12, with its end at cx+224; 0 if none
+fn month_word(cx, s, p, e):
+    let n = word_len(s, p, e)
+    let m = month_of(s, p, e)
+    if m == 0 or n < 3:
+        return 0
+    if n > 3 and same(s + p, n, month_full(m)) == 0 and (m != 9 or same(s + p, n, "sept") == 0):
+        return 0
+    let q = p + n
+    if q < e and u8(s + q) == 46:
+        q = q + 1
+    store(cx + 224, q)
+    return m
+
+fn day_full(k):
+    if k == 0: return "monday"
+    if k == 1: return "tuesday"
+    if k == 2: return "wednesday"
+    if k == 3: return "thursday"
+    if k == 4: return "friday"
+    if k == 5: return "saturday"
+    return "sunday"
+
+# the end of a weekday's name at p -- Mon, Monday, MON -- or p when there is none
+fn weekday_end(s, p, e):
+    let n = word_len(s, p, e)
+    let k = 0
+    while k < 7:
+        let full = day_full(k)
+        if (n == 3 and same_n(s + p, full, 3) == 1) or same(s + p, n, full) == 1:
+            return p + n
+        k = k + 1
+    return p
+
+fn skip_spaces(s, p, e):
+    let q = p
+    while q < e and u8(s + q) == 32:
+        q = q + 1
+    return q
+
+# one or two digits at p and no third: the number, with its end at cx+228; -1 if none
+fn num12(cx, s, p, e):
+    let v = digits(s, p, e, 2)
+    let q = p + 2
+    if v < 0:
+        v = digits(s, p, e, 1)
+        q = p + 1
+    if v < 0 or (q < e and isdig(u8(s + q)) == 1):
+        return 0 - 1
+    store(cx + 228, q)
+    return v
+
+fn full_year(y):                              # a two-digit year, as strptime reads one: 69-99 are 1900s
+    if y >= 69:
+        return 1900 + y
+    return 2000 + y
+
+fn ordinal(s, p, e):                          # past the "st", "nd", "rd" or "th" after a day's number
+    if p + 2 > e:
+        return p
+    let a = lower(u8(s + p))
+    let b = lower(u8(s + p + 1))
+    if (a == 115 and b == 116) or (a == 110 and b == 100) or (a == 114 and b == 100) or (a == 116 and b == 104):
+        if p + 2 >= e or isalnum(u8(s + p + 2)) == 0:
+            return p + 2
+    return p
+
+# AM or PM at p -- PM, pm, p.m., P.M. -- 1 for AM and 2 for PM, with the end at cx+232; 0 for neither.
+# Not when a word runs on after it: "pm-web01" is a host.
+fn ampm(cx, s, p, e):
+    if p + 2 > e:
+        return 0
+    let a = lower(u8(s + p))
+    if a != 97 and a != 112:
+        return 0
+    let q = p + 1
+    if u8(s + q) == 46:
+        q = q + 1
+    if q >= e or lower(u8(s + q)) != 109:
+        return 0
+    q = q + 1
+    if q < e and u8(s + q) == 46:
+        q = q + 1
+    if q < e and (isalnum(u8(s + q)) == 1 or u8(s + q) == 45 or u8(s + q) == 95):
+        return 0
+    store(cx + 232, q)
+    if a == 97:
+        return 1
+    return 2
+
+# a fraction of a second at p, after a point or a comma; the end, p when there is none. A comma fraction
+# is three digits (Python's and log4j's 15:14:05,123) or runs straight into a zone: after a comma
+# anything else is the next field of a CSV row.
+fn scan_fraction(cx, s, p, e):
+    if p + 1 >= e or (u8(s + p) != 46 and u8(s + p) != 44) or isdig(u8(s + p + 1)) == 0:
+        return p
+    let q = p + 1
+    let f = i64(0)
+    let k = 0
+    while q < e and isdig(u8(s + q)) == 1:
+        if k < 9:
+            f = f * i64(10) + i64(u8(s + q) - 48)
+            k = k + 1
+        q = q + 1
+    if u8(s + p) == 44 and q - p != 4 and (q >= e or (u8(s + q) != 90 and u8(s + q) != 43 and u8(s + q) != 45)):
+        return p
+    store64(cx + 176, f)
+    store(cx + 168, k)
+    return q
+
+# a time at p: 15:14, 15:14:05, 3:14:05 PM, with a fraction, and 15.14.05 or 15-14-05 (Oracle, file
+# names: two digits each and the seconds too). Fills the time fields; the end, or -1.
+fn scan_time(cx, s, p, e):
+    let h = digits(s, p, e, 2)
+    let q = p + 2
+    if h < 0:
+        h = digits(s, p, e, 1)
+        q = p + 1
+    if h < 0 or q >= e:
+        return 0 - 1
+    let sep = u8(s + q)
+    if sep != 58 and (q - p != 2 or (sep != 46 and sep != 45)):
+        return 0 - 1
+    let mi = digits(s, q + 1, e, 2)
+    if mi < 0:
+        return 0 - 1
+    q = q + 3
+    let sec = 0 - 1
+    if q < e and u8(s + q) == sep:
+        sec = digits(s, q + 1, e, 2)
+    if sec >= 0:
+        q = q + 3
+    elif sep != 58:
+        return 0 - 1
+    if q < e and isdig(u8(s + q)) == 1:
+        return 0 - 1
+    store(cx + 168, 0)
+    store64(cx + 176, i64(0))
+    if sec >= 0:
+        q = scan_fraction(cx, s, q, e)
+    else:
+        sec = 0
+    let ap = ampm(cx, s, skip_spaces(s, q, e), e)
+    if ap > 0 and h >= 1 and h <= 12:         # 15:14 PM is not 3 PM: the PM is left unread
+        if h == 12:
+            h = 0
+        if ap == 2:
+            h = h + 12
+        q = load(cx + 232)
+    store(cx + 156, h)
+    store(cx + 160, mi)
+    store(cx + 164, sec)
+    return q
+
+# after a date: what separates it from the time, the time, and what follows the time. seps: 1 when T
+# (or _, as file names have it) may separate them, 2 when a colon may (the web server's
+# 23/Sep/2024:15:26:11). Always: spaces, a comma (Sep 23, 2024, 3:14:05 PM), " @ " (Kibana), " at "
+# (macOS), and FortiGate's "date=2024-09-23 time=15:14:05".
+fn date_rest(cx, s, p, e, seps):
+    if p >= e:
+        return 0 - 1
+    let q = p
+    let c = u8(s + q)
+    if (c == 84 or c == 116 or c == 95) and (seps & 1) == 1:
+        q = q + 1
+    elif c == 58 and (seps & 2) == 2:
+        q = q + 1
+    elif c == 32 or c == 44:
+        if c == 44:
+            q = q + 1
+        q = skip_spaces(s, q, e)
+        if q + 1 < e and u8(s + q) == 64 and u8(s + q + 1) == 32:
+            q = skip_spaces(s, q + 1, e)
+        elif q + 2 < e and lower(u8(s + q)) == 97 and lower(u8(s + q + 1)) == 116 and u8(s + q + 2) == 32:
+            q = skip_spaces(s, q + 2, e)
+        elif q + 5 <= e and same_n(s + q, "time=", 5) == 1:
+            q = q + 5
+    else:
+        return 0 - 1
+    q = scan_time(cx, s, q, e)
+    if q < 0:
+        return 0 - 1
+    return date_tail(cx, s, q, e)
+
+# what may follow a time: a zone; and for a syslog-shaped date with no year, the year after the time
+# and a zone after that (Unix date's "Mon Sep 23 15:14:05 UTC 2024", openssl's "Sep 23 15:14:05 2024
+# GMT", git's "Mon Sep 23 11:14:05 2024 -0400"). The end.
+fn date_tail(cx, s, p, e):
+    let q = scan_zone(cx, s, p, e)
+    if load(cx + 140) != 4:
+        return q
+    let a = skip_spaces(s, q, e)
+    let y = digits(s, a, e, 4)
+    if a > q and y >= 1900 and y < 2200 and (a + 4 >= e or isalnum(u8(s + a + 4)) == 0):
+        store(cx + 144, y)
+        store(cx + 140, 5)
+        q = scan_zone(cx, s, a + 4, e)
+    return q
+
+# an offset at p -- +HH:MM, +HHMM, +HH, and after UTC or GMT (short 1) +H -- put at cx+188; the end,
+# or -1. After a space (spaced 1) only +HHMM and +HH:MM, so "15:14:05 -12 dB" is not a zone.
+fn offset_at(cx, s, p, e, spaced, short):
+    if p >= e or (u8(s + p) != 43 and u8(s + p) != 45):
+        return 0 - 1
+    let hh = digits(s, p + 1, e, 2)
+    let q = p + 3
+    if hh < 0 and short == 1:
+        hh = digits(s, p + 1, e, 1)
+        q = p + 2
+    if hh < 0 or hh > 18:
+        return 0 - 1
+    let mm = 0 - 1
+    if q < e and u8(s + q) == 58:
+        mm = digits(s, q + 1, e, 2)
+        if mm >= 0:
+            q = q + 3
+    elif q - p == 3:
+        mm = digits(s, q, e, 2)
+        if mm >= 0:
+            q = q + 2
+    if mm > 59 or (spaced == 1 and mm < 0):
+        return 0 - 1
+    if mm < 0:
+        mm = 0
+    if q < e and isdig(u8(s + q)) == 1:
+        return 0 - 1
+    let off = hh * 3600 + mm * 60
+    if u8(s + p) == 45:
+        off = 0 - off
+    store(cx + 188, off)
+    return q
+
+fn runs_on(s, p, e):                          # does a word go on at p, as a host's does: EST-SRV01, EST.lan
+    if p >= e:
+        return 0
+    let c = u8(s + p)
+    if c == 45 or c == 95 or c == 47:
+        return 1
+    if c == 46 and p + 1 < e and isalnum(u8(s + p + 1)) == 1:
+        return 1
+    return 0
+
+fn upper_word(s, p, n):                       # capitals only (Guam's ChST is the one exception)
+    if same(s + p, n, "chst") == 1:
+        return 1
+    let i = 0
+    while i < n:
+        if u8(s + p + i) < 65 or u8(s + p + i) > 90:
+            return 0
+        i = i + 1
+    return 1
+
+# a zone after a time or a year, or p itself when there is none: Z; an offset; UTC, GMT or UT, with an
+# offset after it or not (GMT-0400, UTC+5:30); or an abbreviation some zone uses (EDT, IST, AEST).
+fn scan_zone(cx, s, p, e):
+    if load(cx + 184) != 0:
+        return p
+    let q = p
+    let spaced = 0
+    if q < e and u8(s + q) == 32:
+        q = skip_spaces(s, q, e)
+        spaced = 1
+    if q >= e:
+        return p
+    let c = u8(s + q)
+    if c == 43 or c == 45:
+        let z = offset_at(cx, s, q, e, spaced, 0)
+        if z < 0:
+            return p
+        store(cx + 184, 1)
+        return zone_after(cx, s, z, e)
+    let n = word_len(s, q, e)
+    if n == 0 or (q + n < e and isdig(u8(s + q + n)) == 1):
+        return p
+    if n == 1 and (c == 90 or (c == 122 and spaced == 0)):
+        store(cx + 184, 1)
+        store(cx + 188, 0)
+        return zone_after(cx, s, q + 1, e)
+    if same(s + q, n, "utc") == 1 or same(s + q, n, "gmt") == 1 or same(s + q, n, "ut") == 1:
+        store(cx + 184, 1)
+        store(cx + 188, 0)
+        let o = offset_at(cx, s, q + n, e, 0, 1)
+        if o >= 0:
+            return zone_after(cx, s, o, e)
+        return zone_after(cx, s, q + n, e)
+    if n >= 2 and n <= 5 and upper_word(s, q, n) == 1 and runs_on(s, q + n, e) == 0 and abbr_known(cx, s + q, n) == 1:
+        store(cx + 184, 2)
+        store(cx + 192, s + q)
+        store(cx + 196, n)
+        return q + n
+    return p
+
+# after a zone, what only repeats it: Java's [Asia/Kolkata], email's (EDT), JavaScript's (Eastern
+# Daylight Time), Go's UTC in "+0000 UTC". The end.
+fn zone_after(cx, s, p, e):
+    if p < e and u8(s + p) == 91:
+        let r = p + 1
+        while r < e and u8(s + r) != 93 and u8(s + r) > 32 and r - p < 64:
+            r = r + 1
+        if r < e and u8(s + r) == 93:
+            return r + 1
+        return p
+    let a = skip_spaces(s, p, e)
+    if a < e and u8(s + a) == 40:
+        let t = a + 1
+        while t < e and (isalpha(u8(s + t)) == 1 or u8(s + t) == 32) and t - a < 64:
+            t = t + 1
+        if t < e and t > a + 1 and u8(s + t) == 41:
+            return t + 1
+        return p
+    let n = word_len(s, a, e)
+    if a > p and n >= 2 and n <= 5 and (a + n >= e or isalnum(u8(s + a + n)) == 0):
+        if same(s + a, n, "utc") == 1 or same(s + a, n, "gmt") == 1 or (upper_word(s, a, n) == 1 and runs_on(s, a + n, e) == 0 and abbr_known(cx, s + a, n) == 1):
+            return a + n
+    return p
+
+# ---- zone abbreviations --------------------------------------------------------------------------
+# An abbreviation after a time means whatever the IANA database uses it for: every offset some zone
+# has under that name. Most have one (EDT is -4 wherever it is used); CST, CDT, IST and PST have
+# several and are read every way.
+
+# names the IANA database now writes as numbers but Java's Date.toString() still prints and people
+# still write, each with its one meaning in minutes east of UTC (checked against Java 8's names). AST
+# is also Atlantic time in the IANA database, so Arabia's is one more meaning. GET, Georgia's, is left
+# out: after a time it is the web's GET far more often. 9999: not one of them.
+fn legacy_abbr(a, n):
+    if same(a, n, "sgt") == 1: return 480
+    if same(a, n, "gst") == 1: return 240
+    if same(a, n, "ast") == 1: return 180
+    if same(a, n, "ict") == 1: return 420
+    if same(a, n, "pht") == 1: return 480
+    if same(a, n, "myt") == 1: return 480
+    if same(a, n, "bdt") == 1: return 360
+    if same(a, n, "npt") == 1: return 345
+    if same(a, n, "irst") == 1: return 210
+    if same(a, n, "irdt") == 1: return 270
+    if same(a, n, "aft") == 1: return 270
+    if same(a, n, "trt") == 1: return 180
+    if same(a, n, "uzt") == 1: return 300
+    if same(a, n, "azt") == 1: return 240
+    if same(a, n, "mmt") == 1: return 390
+    if same(a, n, "fjt") == 1: return 720
+    if same(a, n, "brt") == 1: return 0 - 180
+    if same(a, n, "brst") == 1: return 0 - 120
+    if same(a, n, "art") == 1: return 0 - 180
+    if same(a, n, "clt") == 1: return 0 - 240
+    if same(a, n, "clst") == 1: return 0 - 180
+    if same(a, n, "cot") == 1: return 0 - 300
+    if same(a, n, "pet") == 1: return 0 - 300
+    if same(a, n, "vet") == 1: return 0 - 240
+    return 9999
+
+fn types_use(line, a, n):                     # does a record's list of types use abbreviation a[0..n)?
+    let p = 0
+    while u8(line + p) != 124:
+        while u8(line + p) != 58:
+            p = p + 1
+        p = p + 3
+        let q = p
+        while u8(line + q) != 44 and u8(line + q) != 124:
+            q = q + 1
+        if q - p == n and same_n(line + p, a, n) == 1:
+            return 1
+        p = q
+        if u8(line + p) == 44:
+            p = p + 1
+    return 0
+
+fn in_list(buf, count, a, n):                 # is a[0..n) one of the strings in buf, ignoring case?
+    let p = 0
+    let k = 0
+    while k < count:
+        if same(a, n, buf + p) == 1:
+            return 1
+        p = p + slen(buf + p) + 1
+        k = k + 1
+    return 0
+
+# every alphabetic abbreviation the zone table uses, once each, as "EST\0EDT\0..." at cx+272 (how
+# many at cx+276), so that telling a zone from the next word of a log line is quick. Built on first use.
+fn abbr_list(cx):
+    if load(cx + 272) != 0:
+        return load(cx + 272)
+    if load_table(cx) == 0:
+        return 0
+    let buf = alloc(4096)
+    let used = 0
+    let count = 0
+    let r = 0
+    while r < load(cx + 236):
+        let line = load(load(cx + 120) + r * 4)
+        let p = 0
+        while u8(line + p) != 124:
+            while u8(line + p) != 58:
+                p = p + 1
+            p = p + 3
+            let q = p
+            while u8(line + q) != 44 and u8(line + q) != 124:
+                q = q + 1
+            if isalpha(u8(line + p)) == 1 and q - p <= 6 and used + q - p < 4095 and in_list(buf, count, line + p, q - p) == 0:
+                mem_copy(buf + used, line + p, q - p)
+                store8(buf + used + q - p, 0)
+                used = used + q - p + 1
+                count = count + 1
+            p = q
+            if u8(line + p) == 44:
+                p = p + 1
+        r = r + 1
+    store(cx + 276, count)
+    store(cx + 272, buf)
+    return buf
+
+fn abbr_known(cx, a, n):                      # is a[0..n) a zone abbreviation at all?
+    if legacy_abbr(a, n) != 9999:
+        return 1
+    let buf = abbr_list(cx)
+    if buf == 0:
+        return 0
+    return in_list(buf, load(cx + 276), a, n)
+
+fn add_meaning(cx, off):                      # one more offset the abbreviation can mean, kept sorted
+    let n = load(cx + 204)
+    let i = 0
+    while i < n:
+        if load(cx + 240 + i * 4) == off:
+            return 0
+        i = i + 1
+    if n >= 8:
+        return 0
+    let j = n
+    while j > 0 and load(cx + 240 + (j - 1) * 4) > off:
+        store(cx + 240 + j * 4, load(cx + 240 + (j - 1) * 4))
+        j = j - 1
+    store(cx + 240 + j * 4, off)
+    store(cx + 204, n + 1)
+    return 0
+
+# is type k of zone z in force at some time in [t0, t1]?
+fn type_in_force(z, k, t0: i64, t1: i64):
+    let lo = t0
+    let hi = t1
+    if lo < zones_first_second():
+        lo = zones_first_second()
+    if hi >= zones_end_second():
+        hi = zones_end_second() - i64(1)
+    if lo > hi:
+        return 0
+    if zone_type(z, lo) == k:
+        return 1
+    let nc = load(z + 20)
+    let zt = load(load(z + 16))
+    let zi = load(load(z + 16) + 4)
+    let i = 0
+    while i < nc:
+        let at = load64(zt + 8 * i)
+        if at > lo and at <= hi and load(zi + 4 * i) == k:
+            return 1
+        i = i + 1
+    return 0
+
+fn abbr_scan(cx, a, n, t0: i64, t1: i64):     # the offsets of a[0..n) in force in [t0, t1], added
+    let r = 0
+    while r < load(cx + 236):
+        if types_use(load(load(cx + 120) + r * 4), a, n) == 1:
+            let z = zone_obj(cx, r)
+            let k = 0
+            while k < load(z):
+                if same(a, n, load(load(z + 12) + k * 4)) == 1 and type_in_force(z, k, t0, t1) == 1:
+                    add_meaning(cx, load(load(z + 4) + k * 4))
+                k = k + 1
+        r = r + 1
+    return 0
+
+# what the abbreviation read can mean around year y: every offset the IANA database gives it, in any
+# zone, at some time from the start of the year before to the end of the year after -- so PST in July
+# is still Los Angeles's winter -8 as well as Manila's +8 -- and its meaning in legacy_abbr; with
+# neither, every offset the table ever gives it. Sorted west to east at cx+240, how many at cx+204.
+fn abbr_meanings(cx, y):
+    let a = load(cx + 192)
+    let n = load(cx + 196)
+    store(cx + 204, 0)
+    let legacy = legacy_abbr(a, n)
+    if legacy != 9999:
+        add_meaning(cx, legacy * 60)
+    if load_table(cx) == 0:
+        return 0
+    abbr_scan(cx, a, n, i64(days_from_civil(y - 1, 1, 1)) * i64(86400), i64(days_from_civil(y + 2, 1, 1)) * i64(86400) - i64(1))
+    if load(cx + 204) == 0:
+        abbr_scan(cx, a, n, zones_first_second(), zones_end_second() - i64(1))
+    return 0
+
+# ---- the layouts ---------------------------------------------------------------------------------
+
+# 2024-09-23 (ISO 8601), 2024-W39-1 and 2024-267 (ISO 8601's week and ordinal dates), 2024-Sep-23;
+# 2024/09/23 and 2024.09.23 (firewalls, Go, nginx, Windows Update, East Asian locales). Then a time.
+fn date_year_first(cx, s, p, e):
+    let y = digits(s, p, e, 4)
+    let sep = u8(s + p + 4)
+    let q = p + 5
+    if sep != 45:
+        let mo = num12(cx, s, q, e)
+        let r = load(cx + 228)
+        if mo < 0 or r >= e or u8(s + r) != sep:
+            return 0 - 1
+        let d = num12(cx, s, r + 1, e)
+        if d < 0:
+            return 0 - 1
+        set_date(cx, 7, y, mo, d)
+        return date_rest(cx, s, load(cx + 228), e, 1)
+    let mw = month_word(cx, s, q, e)
+    if mw > 0:
+        let a = load(cx + 224)
+        if a >= e or u8(s + a) != 45:
+            return 0 - 1
+        let dd = num12(cx, s, a + 1, e)
+        if dd < 0:
+            return 0 - 1
+        set_date(cx, 6, y, mw, dd)
+        return date_rest(cx, s, load(cx + 228), e, 1)
+    if q < e and (u8(s + q) == 87 or u8(s + q) == 119):
+        return iso_week(cx, s, p, e, y)
+    let mo2 = digits(s, q, e, 2)
+    if mo2 >= 0 and q + 2 < e and u8(s + q + 2) == 45:
+        let d2 = digits(s, q + 3, e, 2)
+        if d2 < 0 or (q + 5 < e and isdig(u8(s + q + 5)) == 1):
+            return 0 - 1
+        set_date(cx, 1, y, mo2, d2)
+        return date_rest(cx, s, q + 5, e, 1)
+    let doy = digits(s, q, e, 3)
+    if doy < 1 or (q + 3 < e and isdig(u8(s + q + 3)) == 1):
+        return 0 - 1
+    let z = days_from_civil(y, 1, 1) + doy - 1
+    if clock_year(z) != y:
+        return 0 - 1
+    set_date(cx, 1, y, clock_month(z), clock_day(z))
+    return date_rest(cx, s, q + 3, e, 1)
+
+# 2024-W39-1: ISO 8601's week date. Weeks start on Monday; week 1 is the one with the year's first
+# Thursday. Then a time.
+fn iso_week(cx, s, p, e, y):
+    let wk = digits(s, p + 6, e, 2)
+    if wk < 1 or wk > 53 or p + 8 >= e or u8(s + p + 8) != 45:
+        return 0 - 1
+    let wd = digits(s, p + 9, e, 1)
+    if wd < 1 or wd > 7 or (p + 10 < e and isdig(u8(s + p + 10)) == 1):
+        return 0 - 1
+    let jan4 = days_from_civil(y, 1, 4)
+    let monday = jan4 - clock_fmod(clock_weekday(jan4) + 6, 7)
+    let z = monday + (wk - 1) * 7 + wd - 1
+    if wk == 53 and clock_year(monday + 52 * 7 + 3) != y:
+        return 0 - 1
+    set_date(cx, 1, clock_year(z), clock_month(z), clock_day(z))
+    return date_rest(cx, s, p + 10, e, 1)
+
+# 20240923T151405Z (ISO 8601's basic form), 20240923151405.0Z (LDAP: Active Directory's whenCreated),
+# 240923151405Z (a certificate's UTCTime: 50-99 are 1950-1999), and with no zone 20240923151405 and
+# 20240923_151405 (file names, Android's photos) -- a 14-digit number is one only for 1970 to 2099.
+fn date_compact(cx, s, p, e, n):
+    let b = p                                 # where a four-digit year would start
+    let y = 0
+    if n == 12:
+        y = digits(s, p, e, 2)
+        if y >= 50:
+            y = 1900 + y
+        else:
+            y = 2000 + y
+        b = p - 2
+    else:
+        y = digits(s, p, e, 4)
+    let mo = digits(s, b + 4, e, 2)
+    let d = digits(s, b + 6, e, 2)
+    let t = b + 8
+    let f = 12
+    if n == 8:
+        if t >= e:
+            return 0 - 1
+        let c = u8(s + t)
+        if c == 84 or c == 116:
+            f = 1
+        elif c != 95 and c != 45:
+            return 0 - 1
+        t = t + 1
+        if digits(s, t, e, 6) < 0 or (t + 6 < e and isdig(u8(s + t + 6)) == 1):
+            return 0 - 1
+    store(cx + 156, digits(s, t, e, 2))
+    store(cx + 160, digits(s, t + 2, e, 2))
+    store(cx + 164, digits(s, t + 4, e, 2))
+    store(cx + 168, 0)
+    store64(cx + 176, i64(0))
+    set_date(cx, f, y, mo, d)
+    let q = scan_zone(cx, s, scan_fraction(cx, s, t + 6, e), e)
+    if n == 12:
+        if load(cx + 184) == 0:
+            return 0 - 1
+        store(cx + 140, 11)
+    if n == 14:
+        if load(cx + 184) != 0:
+            store(cx + 140, 10)
+        elif y < 1970 or y > 2099:
+            return 0 - 1
+    return q
+
+# 23/09/2024, 9/23/24, 23-09-2024 (the day and the month either way round, unless one is over 12);
+# 23.09.2024 (day first: the one order dots are written in); 23/Sep/2024, 23-Sep-2024, 23-SEP-24,
+# 23 Sep 2024, 23 September 2024, 23Sep2024 (Check Point); and 09-23 with no year (Android's logcat).
+# Then a time.
+fn date_day_first(cx, s, p, e):
+    let a = num12(cx, s, p, e)
+    let q = load(cx + 228)
+    if a < 0 or q >= e:
+        return 0 - 1
+    let sep = u8(s + q)
+    let m = q
+    if sep == 47 or sep == 45:
+        m = q + 1
+    elif sep == 46 and q + 1 < e and u8(s + q + 1) == 32:
+        m = skip_spaces(s, q + 1, e)
+    elif sep == 32:
+        m = skip_spaces(s, q, e)
+    let mo = month_word(cx, s, m, e)
+    if mo > 0:
+        return date_day_month(cx, s, a, mo, sep, load(cx + 224), e)
+    if sep != 47 and sep != 45 and sep != 46:
+        return 0 - 1
+    let b = num12(cx, s, q + 1, e)
+    let r = load(cx + 228)
+    if b < 0 or r >= e:
+        return 0 - 1
+    if u8(s + r) != sep:
+        if sep == 45 and u8(s + r) == 32:     # 09-23 15:14:05.123: logcat's, month first
+            set_date(cx, 14, 0 - 1, a, b)
+            return with_fraction(cx, date_rest(cx, s, r, e, 0))
+        return 0 - 1
+    let y = digits(s, r + 1, e, 4)
+    let t = r + 5
+    if y < 0 or (t < e and isdig(u8(s + t)) == 1):
+        y = digits(s, r + 1, e, 2)
+        t = r + 3
+        if y < 0 or (t < e and isdig(u8(s + t)) == 1):
+            return 0 - 1
+        y = full_year(y)
+    if sep == 46 or a > 12:
+        set_date(cx, 9, y, b, a)
+    else:
+        set_date(cx, 8, y, a, b)              # month first, as the US writes it ...
+        if b <= 12 and a != b:
+            store(cx + 200, 1)                # ... and day first, when that is a date too
+    return date_rest(cx, s, t, e, 0)
+
+# a day and a month's name have been read, the name ending at p: the year and the time after them.
+# 23/Sep/2024:15:26:11 is the web server's; 23 Sep 2024 with a zone after the time an email date.
+fn date_day_month(cx, s, d, mo, sep, p, e):
+    let t = p
+    if sep == 47 or sep == 45:
+        if p >= e or u8(s + p) != sep:
+            return 0 - 1
+        t = p + 1
+    elif sep == 32 or sep == 46:
+        if p >= e or u8(s + p) != 32:
+            return 0 - 1
+        t = skip_spaces(s, p, e)
+    let y = digits(s, t, e, 4)
+    let q = t + 4
+    if y < 0 or (q < e and isdig(u8(s + q)) == 1):
+        if sep != 45:
+            return 0 - 1
+        y = digits(s, t, e, 2)                # 23-SEP-24: Oracle's
+        q = t + 2
+        if y < 0 or (q < e and isdig(u8(s + q)) == 1):
+            return 0 - 1
+        y = full_year(y)
+    let f = 6
+    let seps = 0
+    if sep == 47 and q < e and u8(s + q) == 58:
+        f = 3
+        seps = 2
+    elif sep == 32:
+        f = 2
+    set_date(cx, f, y, mo, d)
+    let r = date_rest(cx, s, q, e, seps)
+    if f == 2 and load(cx + 184) == 0:
+        store(cx + 140, 6)                    # no zone: not an email date, a date with a month name
+    return r
+
+# Sep 23 15:27:40 (syslog: no year), Sep 23 2024 15:27:40 (Cisco), Sep 23, 2024 3:14:05 PM (Java),
+# September 23, 2024 at 3:14:05 PM (macOS), Sep 23, 2024 @ 15:14:05.123 (Kibana); after a weekday,
+# Mon Sep 23 15:14:05 UTC 2024 (Unix date: the year after the time) and Mon Sep 23 2024 11:14:05
+# GMT-0400 (JavaScript)
+fn date_month_first(cx, s, p, e):
+    let mo = month_word(cx, s, p, e)
+    if mo == 0:
+        return 0 - 1
+    let q = load(cx + 224)
+    if q >= e or u8(s + q) != 32:
+        return 0 - 1
+    let d = num12(cx, s, skip_spaces(s, q, e), e)
+    if d < 1:
+        return 0 - 1
+    q = ordinal(s, load(cx + 228), e)
+    if q < e and u8(s + q) == 44:
+        q = q + 1
+    let a = skip_spaces(s, q, e)
+    let y = digits(s, a, e, 4)
+    if a > q and y >= 0 and (a + 4 >= e or (isdig(u8(s + a + 4)) == 0 and u8(s + a + 4) != 58)):
+        set_date(cx, 6, y, mo, d)
+        return date_rest(cx, s, a + 4, e, 0)
+    set_date(cx, 4, 0 - 1, mo, d)
+    return date_rest(cx, s, q, e, 0)
+
+# the end q of a date with no year that has to show a fraction of a second to be one, or -1: klog and
+# logcat always write one, and without it "slots 10-12 15:00" would be the 12th of October
+fn with_fraction(cx, q):
+    if q < 0 or load(cx + 168) < 3:
+        return 0 - 1
+    return q
+
+# a date that starts with digits
+fn date_digits(cx, s, p, e):
+    let n = 0
+    while p + n < e and isdig(u8(s + p + n)) == 1:
+        n = n + 1
+    let sep = 0
+    if p + n < e:
+        sep = u8(s + p + n)
+    if n == 4 and (sep == 45 or sep == 47 or sep == 46):
+        return date_year_first(cx, s, p, e)
+    if n == 8 or n == 12 or n == 14:
+        return date_compact(cx, s, p, e, n)
+    if n <= 2:
+        return date_day_first(cx, s, p, e)
+    return 0 - 1
+
+# the year of a date written without one (syslog, klog, logcat): --year when given, or else the latest
+# year in which that date is at most two days after now -- a December line read in January is last
+# year's. -1 when there is no clock to ask.
+fn guess_year(cx, mo, d):
+    if load(cx + 216) > 0:
+        return load(cx + 216)
+    let now = load64(cx + 208)
+    if now <= i64(0) or mo < 1 or mo > 12:
+        return 0 - 1
+    let y = clock_year(i32(fdiv64(now, i64(86400))))
+    let k = 0
+    while k < 8:
+        if d >= 1 and d <= days_in_month(y, mo):
+            let t = i64(days_from_civil(y, mo, d)) * i64(86400) + i64(load(cx + 156) * 3600 + load(cx + 160) * 60 + load(cx + 164))
+            if t - now <= i64(172800):
+                return y
+        y = y - 1
+        k = k + 1
+    return 0 - 1
+
+# reading r of the date just read: r / 8 is the order (1: the day and the month the other way round),
+# r % 8 which meaning of its zone abbreviation. Puts the instant in the context; 0 when that reading
+# does not exist or is not a real date.
+fn date_applies(cx, r):
+    let order = r / 8
+    let m = r - order * 8
+    if order == 1 and load(cx + 200) == 0:
+        return 0
+    let zk = load(cx + 184)
+    if (zk == 2 and m >= load(cx + 204)) or (zk != 2 and m > 0):
+        return 0
+    let mo = load(cx + 148)
+    let d = load(cx + 152)
+    if order == 1:
+        mo = load(cx + 152)
+        d = load(cx + 148)
+    let off = 0
+    if zk == 1:
+        off = load(cx + 188)
+    if zk == 2:
+        off = load(cx + 240 + m * 4)
+    store(cx + 220, off)
+    let y = load(cx + 144)
+    if y < 0:
+        y = guess_year(cx, mo, d)
+    if y < 1:
+        return 0
+    store(cx + 172, y)
+    if set_civil(cx, y, mo, d, load(cx + 156), load(cx + 160), load(cx + 164), off) == 0:
+        return 0
+    store64(cx + 72, load64(cx + 176))
+    store(cx + 80, load(cx + 168))
+    if zk == 0:
+        store(cx + 84, 1)
+    else:
+        store(cx + 84, 0)
+    return 1
+
+# a date just read is one when its zone abbreviation means something around then and at least one of
+# its readings is a real date. The end, or -1.
+fn date_check(cx, q):
+    if load(cx + 184) == 2:
+        let y = load(cx + 144)
+        if y < 0:
+            y = guess_year(cx, load(cx + 148), load(cx + 152))
+        if y > 0:
+            abbr_meanings(cx, y)
+        if load(cx + 204) == 0:
+            return 0 - 1
+    let r = 0
+    while r < 16:
+        if date_applies(cx, r) == 1:
+            return q
+        r = r + 1
+    return 0 - 1
+
+# a date and a time at p, in any of the families above, a weekday before it or not. Fills the date
+# fields; the end, or -1 when there is none or it is not a real date in any reading.
+fn scan_date(cx, s, p, e):
+    date_clear(cx)
+    if p >= e:
+        return 0 - 1
+    let q = p
+    let w = weekday_end(s, q, e)
+    if w > q:
+        q = w
+        if q < e and (u8(s + q) == 44 or u8(s + q) == 46):
+            q = q + 1
+        if q >= e or u8(s + q) != 32:
+            return 0 - 1
+        q = skip_spaces(s, q, e)
+        if q >= e:
+            return 0 - 1
+    let c = u8(s + q)
+    let r = 0 - 1
+    if isdig(c) == 1:
+        r = date_digits(cx, s, q, e)
+    elif q == p and (c == 73 or c == 87 or c == 69 or c == 70) and digits(s, q + 1, e, 4) >= 0 and q + 5 < e and u8(s + q + 5) == 32:
+        set_date(cx, 13, 0 - 1, digits(s, q + 1, e, 2), digits(s, q + 3, e, 2))
+        r = with_fraction(cx, date_rest(cx, s, q + 5, e, 0))
+    elif isalpha(c) == 1:
+        r = date_month_first(cx, s, q, e)
+    if r < 0:
+        return 0 - 1
+    return date_check(cx, r)
+
+# ---- zones ---------------------------------------------------------------------------------------
+
+# the zone table, unpacked once and only when a zone is asked for: lib/inflate turns the words in
+# lib zones back into text, lib/crc32 proves it is the text make_zones.py wrote, and every line is
+# cut into a string in place. 1 when ready; 0 after saying why not.
+fn load_table(cx):
+    if load(cx + 20) > 0:
+        return 1
+    let packed = alloc(zones_packed_size() + 4)
+    zones_unpack_into(packed)
+    let n = zones_text_size()
+    let s = alloc(n + 1)
+    let got = inflate_raw(alloc(inflate_work()), packed, zones_packed_size(), s, n)
+    if got != n or crc32(s, n) != zones_text_crc32():
+        put(cx, "tzdig: the built-in zone table does not unpack to what was built\n")
+        store(cx + 36, load(cx + 36) + 1)
+        return 0
+    store8(s + n, 0)
+    # "<names> <records> <countries>", then one line each, every line cut into a string in place
+    let count = number_at(s, 0)
+    let nrec = number_at(s, skip_number(s, 0) + 1)
+    let ncty = number_at(s, skip_number(s, skip_number(s, 0) + 1) + 1)
+    let p = 0
+    while u8(s + p) != 10:
+        p = p + 1
+    let names = alloc(4 * count)
+    let recs = alloc(4 * count)
+    let codes = alloc(4 * count)
+    let lines = alloc(4 * nrec)
+    let ctys = alloc(4 * ncty)
+    let i = 0
+    p = p + 1
+    while i < count + nrec + ncty:
+        let e = p
+        while u8(s + e) != 10:
+            e = e + 1
+        store8(s + e, 0)
+        if i < count:                         # "<name> <record> <country code or ->"
+            let sp = p
+            while u8(s + sp) != 32:
+                sp = sp + 1
+            store8(s + sp, 0)
+            let cc = skip_number(s, sp + 1)
+            store8(s + cc, 0)
+            store(names + i * 4, s + p)
+            store(recs + i * 4, number_at(s, sp + 1))
+            store(codes + i * 4, s + cc + 1)
+        elif i < count + nrec:
+            store(lines + (i - count) * 4, s + p)
+        else:
+            store(ctys + (i - count - nrec) * 4, s + p)
+        p = e + 1
+        i = i + 1
+    store(cx + 16, names)
+    store(cx + 20, count)
+    store(cx + 24, alloc(4 * nrec))
+    store(cx + 120, lines)
+    store(cx + 124, recs)
+    store(cx + 128, codes)
+    store(cx + 132, ctys)
+    store(cx + 136, ncty)
+    store(cx + 236, nrec)
+    return 1
+
+fn number_at(s, p):                           # the decimal number at p
+    let v = 0
+    let q = p
+    while isdig(u8(s + q)) == 1:
+        v = v * 10 + u8(s + q) - 48
+        q = q + 1
+    return v
+
+fn skip_number(s, p):                         # the first position after the digits at p
+    let q = p
+    while isdig(u8(s + q)) == 1:
+        q = q + 1
+    return q
+
+# a zone history, parsed once per record: [ntypes][offsets][daylight][abbrs][first type][nchanges][times][types]
+fn zone_obj(cx, r):
+    let cache = load(cx + 24)
+    if load(cache + r * 4) != 0:
+        return load(cache + r * 4)
+    let s = load(load(cx + 120) + r * 4)
+    let nt = 1
+    let p = 0
+    while u8(s + p) != 124:
+        if u8(s + p) == 44:
+            nt = nt + 1
+        p = p + 1
+    let nc = 0
+    let q = p + 1
+    while u8(s + q) != 124:
+        q = q + 1
+    let t = q + 1
+    while u8(s + t) != 0:
+        if u8(s + t) == 58:
+            nc = nc + 1
+        t = t + 1
+    let z = alloc(24)
+    store(z, nt)
+    store(z + 4, alloc(4 * nt))
+    store(z + 8, alloc(4 * nt))
+    store(z + 12, alloc(4 * nt))
+    store(z + 20, nc)
+    store(cache + r * 4, z)
+    let zt = alloc(8 * nc + 8)
+    let zi = alloc(4 * nc + 4)
+    store(z + 16, alloc(8))
+    store(load(z + 16), zt)
+    store(load(z + 16) + 4, zi)
+    # types: offset:daylight:abbreviation
+    p = 0
+    let i = 0
+    while i < nt:
+        let neg = 0
+        if u8(s + p) == 45:
+            neg = 1
+            p = p + 1
+        let off = 0
+        while u8(s + p) != 58:
+            off = off * 10 + u8(s + p) - 48
+            p = p + 1
+        if neg == 1:
+            off = 0 - off
+        store(load(z + 4) + i * 4, off)
+        store(load(z + 8) + i * 4, u8(s + p + 1) - 48)
+        p = p + 3
+        let a0 = p
+        while u8(s + p) != 44 and u8(s + p) != 124:
+            p = p + 1
+        let ab = alloc(p - a0 + 1)
+        mem_copy(ab, s + a0, p - a0)
+        store8(ab + p - a0, 0)
+        store(load(z + 12) + i * 4, ab)
+        p = p + 1
+        i = i + 1
+    let first = 0
+    while u8(s + p) != 124:
+        first = first * 10 + u8(s + p) - 48
+        p = p + 1
+    store(zi + 4 * nc, first)                 # the type in force at 1970, after the change types
+    p = p + 1
+    let at = zones_first_second()
+    i = 0
+    while i < nc:
+        let dlt = i64(0)
+        while u8(s + p) != 58:
+            dlt = dlt * i64(10) + i64(u8(s + p) - 48)
+            p = p + 1
+        p = p + 1
+        let ty = 0
+        while u8(s + p) != 44 and u8(s + p) != 0:
+            ty = ty * 10 + u8(s + p) - 48
+            p = p + 1
+        if u8(s + p) == 44:
+            p = p + 1
+        at = at + dlt
+        store64(zt + 8 * i, at)
+        store(zi + 4 * i, ty)
+        i = i + 1
+    return z
+
+# the type in force at UTC second t, or -1 outside the table's range
+fn zone_type(z, t: i64):
+    if t < zones_first_second() or t >= zones_end_second():
+        return 0 - 1
+    let nc = load(z + 20)
+    let zt = load(load(z + 16))
+    let zi = load(load(z + 16) + 4)
+    let k = load(zi + 4 * nc)
+    let i = 0
+    while i < nc:
+        if load64(zt + 8 * i) > t:
+            return k
+        k = load(zi + 4 * i)
+        i = i + 1
+    return k
+
+# ---- choosing zones ----------------------------------------------------------------------------------
+# A zone to show is a zone NAME, by its number in the table, so each keeps its own city and country
+# code even where two names share one history.
+
+fn zname(cx, i):
+    return load(load(cx + 16) + i * 4)
+
+fn zrecord(cx, i):
+    return load(load(cx + 124) + i * 4)
+
+fn zcode(cx, i):                              # "AU", or "-" for a name no country uses
+    return load(load(cx + 128) + i * 4)
+
+fn city(nm):                                  # "America/New_York" -> "New_York" (put_label prints the space)
+    let last = nm
+    let j = 0
+    while u8(nm + j) != 0:
+        if u8(nm + j) == 47:
+            last = nm + j + 1
+        j = j + 1
+    return last
+
+fn add_zone(cx, i):                           # zone name i, once
+    let n = load(cx + 12)
+    let k = 0
+    while k < n:
+        if load(load(cx + 8) + k * 4) == i:
+            return 0
+        k = k + 1
+    if n >= 600:
+        return 0
+    store(load(cx + 8) + n * 4, i)
+    store(cx + 12, n + 1)
+    return 0
+
+fn index_of_n(cx, s, n):                      # the number of the IANA name s[0..n), or -1
+    if load_table(cx) == 0:
+        return 0 - 1
+    let i = 0
+    while i < load(cx + 20):
+        if same(s, n, zname(cx, i)) == 1:
+            return i
+        i = i + 1
+    return 0 - 1
+
+fn index_of(cx, iana):
+    return index_of_n(cx, iana, slen(iana))
+
+fn add_iana(cx, iana):
+    let i = index_of(cx, iana)
+    if i >= 0:
+        add_zone(cx, i)
+    return 0
+
+# a country's line in the table, by its ISO 3166 alpha-2 code, or 0. UK is taken for GB: it is the
+# code people type for Britain, and ISO keeps it reserved for exactly that.
+fn country_line(cx, s):
+    if load_table(cx) == 0:
+        return 0
+    let a = lower(u8(s))
+    let b = lower(u8(s + 1))
+    if a == 117 and b == 107:
+        a = 103
+        b = 98
+    let k = 0
+    while k < load(cx + 136):
+        let line = load(load(cx + 132) + k * 4)
+        if lower(u8(line)) == a and lower(u8(line + 1)) == b:
+            return line
+        k = k + 1
+    return 0
+
+# the zones of the country whose code is s[0..2), in the order the IANA database lists them: every
+# one, or with wn > 0 only those whose city is want[0..wn) ("au sydney"). 1 if any was added.
+fn add_country(cx, s, want, wn):
+    let line = country_line(cx, s)
+    if line == 0:
+        return 0
+    let found = 0
+    let p = 3
+    while u8(line + p) != 124:                # past the country's name
+        p = p + 1
+    while u8(line + p) == 124:                # each "|Zone=description"
+        p = p + 1
+        let q = p
+        while u8(line + q) != 61:
+            q = q + 1
+        let i = index_of_n(cx, line + p, q - p)
+        if i >= 0 and (wn == 0 or same(want, wn, city(zname(cx, i))) == 1):
+            add_zone(cx, i)
+            found = 1
+        p = q
+        while u8(line + p) != 124 and u8(line + p) != 0:
+            p = p + 1
+    return found
+
+# common abbreviations, as places. Returns 1 if s[0..n) was one. None is two letters: two
+# letters are a country code (ET is Ethiopia, MT Malta, PT Portugal).
+fn add_shortcut(cx, s, n):
+    if same(s, n, "est") == 1 or same(s, n, "edt") == 1:
+        add_iana(cx, "America/New_York")
+    elif same(s, n, "cst") == 1 or same(s, n, "cdt") == 1:
+        add_iana(cx, "America/Chicago")
+    elif same(s, n, "mst") == 1 or same(s, n, "mdt") == 1:
+        add_iana(cx, "America/Denver")
+        add_iana(cx, "America/Phoenix")
+    elif same(s, n, "pst") == 1 or same(s, n, "pdt") == 1:
+        add_iana(cx, "America/Los_Angeles")
+    elif same(s, n, "gmt") == 1 or same(s, n, "bst") == 1:
+        add_iana(cx, "Europe/London")         # and UTC, which is always shown
+    elif same(s, n, "cet") == 1 or same(s, n, "cest") == 1:
+        add_iana(cx, "Europe/Paris")
+    elif same(s, n, "ist") == 1:
+        add_iana(cx, "Asia/Kolkata")
+    elif same(s, n, "aest") == 1:
+        add_iana(cx, "Australia/Sydney")
+        add_iana(cx, "Australia/Brisbane")
+    elif same(s, n, "aedt") == 1:
+        add_iana(cx, "Australia/Sydney")
+    elif same(s, n, "awst") == 1:
+        add_iana(cx, "Australia/Perth")
+    elif same(s, n, "jst") == 1:
+        add_iana(cx, "Asia/Tokyo")
+    elif same(s, n, "sgt") == 1:
+        add_iana(cx, "Asia/Singapore")
+    elif same(s, n, "gst") == 1:
+        add_iana(cx, "Asia/Dubai")
+    elif same(s, n, "nzst") == 1 or same(s, n, "nzdt") == 1:
+        add_iana(cx, "Pacific/Auckland")
+    else:
+        return 0
+    return 1
+
+# is a zone with the same history and the same city already chosen? (America/Indianapolis and
+# America/Indiana/Indianapolis are one place to anyone who types "indianapolis")
+fn seen_city(cx, i):
+    let c = city(zname(cx, i))
+    let k = 0
+    while k < load(cx + 12):
+        let j = load(load(cx + 8) + k * 4)
+        if zrecord(cx, j) == zrecord(cx, i) and same(c, slen(c), city(zname(cx, j))) == 1:
+            return 1
+        k = k + 1
+    return 0
+
+# one name from --in: a country code, a country code and a city (the label `tzdig` prints, "AU
+# Sydney", or au/sydney, or au_sydney where spaces cannot go), an abbreviation, an IANA name, or a
+# city (the last part of one)
+fn add_named(cx, s, n):
+    if same(s, n, "utc") == 1 or same(s, n, "z") == 1:
+        return 1
+    if n == 2 and isalpha(u8(s)) == 1 and isalpha(u8(s + 1)) == 1:
+        return add_country(cx, s, 0, 0)
+    # "la paz" is not a city of Laos: a code and a city that do not fit fall through to the cities
+    let sep = u8(s + 2)
+    if n > 3 and isalpha(u8(s)) == 1 and isalpha(u8(s + 1)) == 1 and (sep == 32 or sep == 47 or sep == 95):
+        if add_country(cx, s, s + 3, n - 3) == 1:
+            return 1
+    if add_shortcut(cx, s, n) == 1:
+        return 1
+    if load_table(cx) == 0:
+        return 0
+    let found = 0
+    let i = 0
+    while i < load(cx + 20):
+        let nm = zname(cx, i)
+        if same(s, n, nm) == 1 or (same(s, n, city(nm)) == 1 and seen_city(cx, i) == 0):
+            add_zone(cx, i)
+            found = 1
+        i = i + 1
+    return found
+
+# --in a,b,c. Returns 1, or 0 after writing a message for each name that is not a zone.
+pub fn tzdig_zones(cx, spec):
+    let p = 0
+    let ok = 1
+    while u8(spec + p) != 0:
+        let q = p
+        while u8(spec + q) != 0 and u8(spec + q) != 44:
+            q = q + 1
+        let a = skip_spaces(spec, p, q)
+        let b = q
+        while b > a and u8(spec + b - 1) == 32:
+            b = b - 1
+        if b > a and add_named(cx, spec + a, b - a) == 0:
+            put(cx, "tzdig: no zone called '")
+            put_n(cx, spec + a, b - a)
+            put(cx, "' -- use a country code (au), a city (sydney), an IANA name (Europe/Paris) or an abbreviation (est)\n")
+            store(cx + 36, load(cx + 36) + 1)
+            ok = 0
+        p = q
+        if u8(spec + p) == 44:
+            p = p + 1
+    return ok
+
+# "AU Sydney": the country code, when the name has one, and the city
+fn label_len(cx, i):
+    let n = slen(city(zname(cx, i)))
+    if u8(zcode(cx, i)) != 45:
+        n = n + 3
+    return n
+
+fn put_label(cx, i, width):
+    let n = 0
+    if u8(zcode(cx, i)) != 45:
+        put(cx, zcode(cx, i))
+        putc(cx, 32)
+        n = 3
+    let c = city(zname(cx, i))
+    let j = 0
+    while u8(c + j) != 0:
+        if u8(c + j) == 95:
+            putc(cx, 32)
+        else:
+            putc(cx, u8(c + j))
+        j = j + 1
+    n = n + j
+    while n < width:
+        putc(cx, 32)
+        n = n + 1
+    return 0
+
+fn name_width(cx):
+    let w = 3
+    let k = 0
+    while k < load(cx + 12):
+        let n = label_len(cx, load(load(cx + 8) + k * 4))
+        if n > w:
+            w = n
+        k = k + 1
+    return w
+
+# --zones: every country (code, name, how many zones), or one country's zones with the IANA
+# database's description of each. With --json, one JSON array, which the web page's picker is built
+# from. Returns 1, or 0 after saying there is no such country.
+pub fn tzdig_list(cx, code):
+    if load_table(cx) == 0:
+        return 0
+    let json = load(cx + 4) & 1
+    let one = 0
+    if code != 0:
+        one = country_line(cx, code)
+        if one == 0:
+            put(cx, "tzdig: no country with code '")
+            put(cx, code)
+            put(cx, "'\n")
+            return 0
+    if json == 1:
+        putc(cx, 91)
+    let k = 0
+    let first = 1
+    while k < load(cx + 136):
+        let line = load(load(cx + 132) + k * 4)
+        if one == 0 or line == one:
+            let p = 3
+            while u8(line + p) != 124:
+                p = p + 1
+            let zs = 0
+            let t = p
+            while u8(line + t) != 0:
+                if u8(line + t) == 124:
+                    zs = zs + 1
+                t = t + 1
+            if json == 1:
+                if first == 0:
+                    putc(cx, 44)
+                put(cx, "{\"code\":")
+                put_json_str(cx, line, 2)
+                put(cx, ",\"country\":")
+                put_json_str(cx, line + 3, p - 3)
+                put(cx, ",\"zones\":[")
+            else:
+                put_n(cx, line, 2)
+                put(cx, "  ")
+                put_n(cx, line + 3, p - 3)
+                if one == 0:
+                    put(cx, "  (")
+                    put_digits(cx, i64(zs), 1)
+                    if zs == 1:
+                        put(cx, " zone)")
+                    else:
+                        put(cx, " zones)")
+                putc(cx, 10)
+            let z = 0
+            while u8(line + p) == 124:
+                p = p + 1
+                let q = p
+                while u8(line + q) != 61:
+                    q = q + 1
+                let e = q + 1
+                while u8(line + e) != 124 and u8(line + e) != 0:
+                    e = e + 1
+                if json == 1:
+                    if z > 0:
+                        putc(cx, 44)
+                    put(cx, "{\"zone\":")
+                    put_json_str(cx, line + p, q - p)
+                    put(cx, ",\"note\":")
+                    put_json_str(cx, line + q + 1, e - q - 1)
+                    putc(cx, 125)
+                elif one != 0:
+                    put(cx, "  ")
+                    put_n(cx, line + p, q - p)
+                    let pad = q - p
+                    while pad < 34 and e > q + 1:     # no description (a one-zone country): no padding
+                        putc(cx, 32)
+                        pad = pad + 1
+                    put_n(cx, line + q + 1, e - q - 1)
+                    putc(cx, 10)
+                z = z + 1
+                p = e
+            if json == 1:
+                put(cx, "]}")
+            first = 0
+        k = k + 1
+    if json == 1:
+        put(cx, "]\n")
+    return 1
+
+# ---- one reading, shown ----------------------------------------------------------------------------
+
+fn show_zones_human(cx, indent):
+    let sec = load64(cx + 64)
+    let frac = load64(cx + 72)
+    let fd = load(cx + 80)
+    let w = name_width(cx)
+    let i = 0
+    while i < indent:
+        putc(cx, 32)
+        i = i + 1
+    put(cx, "UTC")
+    i = 3
+    while i < w + 3:
+        putc(cx, 32)
+        i = i + 1
+    put_time(cx, sec, frac, fd, 32, 0)
+    putc(cx, 10)
+    let k = 0
+    while k < load(cx + 12):
+        let zi = load(load(cx + 8) + k * 4)
+        let z = zone_obj(cx, zrecord(cx, zi))
+        i = 0
+        while i < indent:
+            putc(cx, 32)
+            i = i + 1
+        put_label(cx, zi, w + 3)
+        let ty = zone_type(z, sec)
+        if ty < 0:
+            put(cx, "(no zone rules for this date: the table covers 1970 to 2069)\n")
+        else:
+            let off = load(load(z + 4) + ty * 4)
+            put_time(cx, sec + i64(off), frac, fd, 32, 0)
+            putc(cx, 32)
+            put(cx, load(load(z + 12) + ty * 4))
+            put(cx, " (")
+            put_offset(cx, off, 1)
+            put(cx, ")\n")
+        k = k + 1
+    return 0
+
+# the family of reading r of a date: read the other way round, a month-first date is a day-first one
+fn date_family(cx, r):
+    let f = load(cx + 140)
+    if r >= 8 and f == 8:
+        return 9
+    if r >= 8 and f == 9:
+        return 8
+    return f
+
+fn reading_id_of(cx, kind, r):                # a reading's name in JSON and in the known answers
+    if kind == 4:
+        return family_id(date_family(cx, r))
+    return reading_id(r)
+
+# a reading's name for people, with what was assumed to read it. After applies(), which says which
+# year and which offset the reading took.
+fn put_reading_name(cx, kind, r):
+    if kind != 4:
+        put(cx, reading_name(r))
+        return 0
+    put(cx, family_name(date_family(cx, r)))
+    if load(cx + 184) == 2:
+        put(cx, ", ")
+        put_n(cx, load(cx + 192), load(cx + 196))
+        put(cx, " read as ")
+        put_offset(cx, load(cx + 220), 1)
+    if load(cx + 144) < 0:
+        put(cx, ", no year given: read as ")
+        put_digits(cx, i64(load(cx + 172)), 1)
+    if load(cx + 184) == 0:
+        put(cx, ", no zone given: read as UTC")
+    return 0
+
+fn show_reading_json(cx, kind, r):
+    let sec = load64(cx + 64)
+    let frac = load64(cx + 72)
+    let fd = load(cx + 80)
+    put(cx, "{\"format\":\"")
+    put(cx, reading_id_of(cx, kind, r))
+    put(cx, "\",\"utc\":\"")
+    put_time(cx, sec, frac, fd, 84, 1)
+    putc(cx, 34)
+    if kind == 4:
+        if load(cx + 184) == 0:
+            put(cx, ",\"zone_given\":false")
+        if load(cx + 144) < 0:
+            put(cx, ",\"year_given\":false,\"year\":")
+            put_digits(cx, i64(load(cx + 172)), 1)
+        if load(cx + 184) == 2:
+            put(cx, ",\"input_zone\":")
+            put_json_str(cx, load(cx + 192), load(cx + 196))
+            put(cx, ",\"input_offset\":\"")
+            put_offset(cx, load(cx + 220), 0)
+            putc(cx, 34)
+    put(cx, ",\"zones\":[")
+    let k = 0
+    while k < load(cx + 12):
+        let zi = load(load(cx + 8) + k * 4)
+        let z = zone_obj(cx, zrecord(cx, zi))
+        if k > 0:
+            putc(cx, 44)
+        put(cx, "{\"zone\":\"")
+        put(cx, zname(cx, zi))
+        putc(cx, 34)
+        if u8(zcode(cx, zi)) != 45:
+            put(cx, ",\"country\":\"")
+            put(cx, zcode(cx, zi))
+            putc(cx, 34)
+        let ty = zone_type(z, sec)
+        if ty >= 0:
+            let off = load(load(z + 4) + ty * 4)
+            put(cx, ",\"time\":\"")
+            put_time(cx, sec + i64(off), frac, fd, 84, 0)
+            put(cx, "\",\"offset\":\"")
+            put_offset(cx, off, 0)
+            put(cx, "\",\"abbreviation\":\"")
+            put(cx, load(load(z + 12) + ty * 4))
+            putc(cx, 34)
+        putc(cx, 125)
+        k = k + 1
+    put(cx, "]}")
+    return 0
+
+# ---- a found token, shown with every reading that applies ------------------------------------------
+# Kinds: 0 a number, 3 a hex number, 4 a date in text (see scan_token).
+
+fn readings_of(kind):                         # how many readings a token of this kind can have
+    if kind == 4:
+        return 16
+    return 9
+
+# does reading r fit the token just scanned? It also puts the instant in the context. A hex number
+# is a FILETIME, or with 8 digits Unix seconds (and only when it is the whole input: in running text
+# 0x and 8 digits is an error code far more often).
+fn applies(cx, kind, r, single):
+    if kind == 0:
+        return read_as(cx, r, single)
+    if kind == 3 and load(cx + 60) == 8:
+        if r == 0 and single == 1:
+            return read_as(cx, 0, single)
+        return 0
+    if kind == 3 and r == 4:
+        return read_as(cx, 4, single)
+    if kind == 4:
+        return date_applies(cx, r)
+    return 0
+
+# the readings of the token just scanned that apply, as a bit set. The 1990-2040 window is for numbers
+# only, the one kind that is ambiguous by nature: an ISO date from 1985 is still an ISO date from 1985.
+fn reading_set(cx, kind, single):
+    let all = (load(cx + 4) >> 1) & 1
+    let set = 0
+    let r = 0
+    while r < readings_of(kind):
+        if applies(cx, kind, r, single) == 1 and (kind != 0 or all == 1 or in_window(cx) == 1):
+            set = set | (1 << r)
+        r = r + 1
+    return set
+
+fn count_bits(set):
+    let n = 0
+    let x = set
+    while x != 0:
+        n = n + (x & 1)
+        x = x >> 1
+    return n
+
+# Active Directory's "never / not set": FILETIME 9223372036854775807 anywhere, and 0 as a whole input
+fn is_marker(cx, kind, single):
+    if (kind == 0 or kind == 3) and load(cx + 56) == 0:
+        if load64(cx + 40) == i64(9223372036854775807) or (single == 1 and load64(cx + 40) == i64(0)):
+            return 1
+    return 0
+
+fn show_token(cx, s, a, b, kind, single):
+    let json = load(cx + 4) & 1
+    let set = reading_set(cx, kind, single)
+    let count = count_bits(set)
+    let marker = is_marker(cx, kind, single)
+    if count == 0 and single == 0 and marker == 0:
+        return 0
+    if json == 1:
+        put(cx, "{\"input\":")
+        put_json_str(cx, s + a, b - a)
+        if load(cx + 32) > 0:
+            put(cx, ",\"line\":")
+            put_digits(cx, i64(load(cx + 32)), 1)
+        if marker == 1:
+            put(cx, ",\"note\":\"Active Directory marker: never / not set\"")
+        put(cx, ",\"readings\":[")
+        let first = 1
+        let r = 0
+        while r < readings_of(kind):
+            if ((set >> r) & 1) == 1 and marker == 0:
+                applies(cx, kind, r, single)
+                if first == 0:
+                    putc(cx, 44)
+                show_reading_json(cx, kind, r)
+                first = 0
+            r = r + 1
+        put(cx, "]}\n")
+        return 1
+    if load(cx + 32) > 0:
+        put(cx, "line ")
+        put_digits(cx, i64(load(cx + 32)), 1)
+        put(cx, ": ")
+    put_n(cx, s + a, b - a)
+    put(cx, "   ")
+    if marker == 1:
+        put(cx, "Active Directory marker: never / not set\n")
+        return 1
+    if count == 0:
+        put(cx, "no reading lands between 1990 and 2040 (--all shows every reading)\n")
+        return 1
+    if count > 1:
+        put_digits(cx, i64(count), 1)
+        put(cx, " readings\n")
+    let k = 0
+    while k < readings_of(kind):
+        if ((set >> k) & 1) == 1:
+            applies(cx, kind, k, single)
+            let indent = 2
+            if count > 1:
+                put(cx, "  as ")
+                indent = 4
+            put_reading_name(cx, kind, k)
+            putc(cx, 10)
+            show_zones_human(cx, indent)
+        k = k + 1
+    return 1
+
+# ---- text in -----------------------------------------------------------------------------------------
+
+# the token starting at p, or -1: a date, a hex number, a number. Its kind at scratch+56 (0 a number,
+# 3 a hex number, 4 a date) and its end as the return value.
+fn scan_token(cx, s, p, e):
+    let sc = load(cx + 28)
+    let q = scan_date(cx, s, p, e)
+    if q >= 0:
+        store(sc + 56, 4)
+        return q
+    q = scan_hex(cx, s, p, e)
+    if q >= 0:
+        store(sc + 56, 3)
+        return q
+    q = scan_number(cx, s, p, e)
+    if q >= 0:
+        store(sc + 56, 0)
+    return q
+
+# a single value -- one command-line argument, or a whole input that is one token -- with one layer of
+# quotes or brackets around it or not: "...", '...', [...], (...), <...>
+pub fn tzdig_value(cx, s):
+    let e = slen(s)
+    let a = 0
+    while a < e and (u8(s + a) == 32 or u8(s + a) == 9 or u8(s + a) == 10 or u8(s + a) == 13):
+        a = a + 1
+    while e > a and (u8(s + e - 1) == 32 or u8(s + e - 1) == 10 or u8(s + e - 1) == 13 or u8(s + e - 1) == 9):
+        e = e - 1
+    if e - a >= 2:
+        let o = u8(s + a)
+        let c = u8(s + e - 1)
+        if (o == 34 and c == 34) or (o == 39 and c == 39) or (o == 91 and c == 93) or (o == 40 and c == 41) or (o == 60 and c == 62):
+            a = a + 1
+            e = e - 1
+    let q = scan_token(cx, s, a, e)
+    if q != e or q <= a:
+        return 0
+    store(cx + 32, 0)
+    show_token(cx, s, a, e, u8(load(cx + 28) + 56), 1)
+    return 1
+
+# the next timestamp in s[p..e) worth showing: one that stands alone (not part of a word, an address or
+# a version) and has a reading, or is Active Directory's never-set marker. A number in running text
+# needs 9 digits or more, the fewest a Unix time in the 1990-2040 window has. Its start at scratch+48
+# and its kind at scratch+56; its end, or -1 when there is none.
+fn text_next(cx, s, p, e):
+    let sc = load(cx + 28)
+    let i = p
+    while i < e:
+        let c = u8(s + i)
+        let before = 0
+        if i > 0:
+            before = u8(s + i - 1)
+        if (isdig(c) == 1 or isalpha(c) == 1) and isalnum(before) == 0 and before != 46:
+            let q = scan_token(cx, s, i, e)
+            let kind = u8(sc + 56)
+            let after = 0
+            if q >= 0 and q < e:
+                after = u8(s + q)
+            if q >= 0 and kind == 0 and (isalnum(after) == 1 or after == 46 or load(cx + 60) < 9):
+                q = 0 - 1
+            if q >= 0 and kind != 0 and isalnum(after) == 1:
+                q = 0 - 1
+            if q > i:
+                if is_marker(cx, kind, 0) == 1 or reading_set(cx, kind, 0) != 0:
+                    store(sc + 48, i)
+                    store(sc + 56, kind)
+                    return q
+                i = q
+                continue
+        i = i + 1
+    return 0 - 1
+
+# every timestamp in a piece of text, each with its line number when the text has more than one line.
+# How many were shown.
+pub fn tzdig_scan(cx, s):
+    let e = slen(s)
+    let t = e
+    while t > 0 and (u8(s + t - 1) == 10 or u8(s + t - 1) == 13 or u8(s + t - 1) == 32):
+        t = t - 1
+    let lines = 0
+    let i = 0
+    while i < t:
+        if u8(s + i) == 10:
+            lines = 1
+        i = i + 1
+    let line = 1
+    let found = 0
+    let p = 0
+    let q = text_next(cx, s, 0, e)
+    while q >= 0:
+        let a = load(load(cx + 28) + 48)
+        while p < a:
+            if u8(s + p) == 10:
+                line = line + 1
+            p = p + 1
+        store(cx + 32, line * lines)
+        found = found + show_token(cx, s, a, q, u8(load(cx + 28) + 56), 0)
+        p = q
+        q = text_next(cx, s, q, e)
+    return found
+
+# any text: a value on its own, or every timestamp in a pasted chunk
+pub fn tzdig_text(cx, s):
+    if tzdig_value(cx, s) == 1:
+        return 1
+    let found = tzdig_scan(cx, s)
+    if found == 0:
+        put(cx, "tzdig: no timestamp found (it reads numbers of 9 or more digits, 0x FILETIMEs, and dates written with a time of day)\n")
+    return found
+
+# ---- the known answers: tests/vectors.tsv in, the same rows out as this build computes them --------
+
+fn field(s, p, e):                            # end of the tab-separated field starting at p
+    let q = p
+    while q < e and u8(s + q) != 9:
+        q = q + 1
+    return q
+
+# The rows, as tools/make_vectors.py writes them:
+#   now      <utc>                        "now" for the rows after it: the year of a date without one
+#   format   <input>  <reading>  <utc>    the input read that way (several utcs when it means several)
+#   bare     <input>  <reading=utc ...>   every reading (a number's: those in 1990-2040)
+#   zone     <utc>  <IANA zone>  <local time>  <offset>  <abbreviation>
+#   pick     <one name, as typed after --in>  <the zones it chooses, in order>
+#   find     <a line of text>  <the timestamps found in it, " | " between them>
+pub fn tzdig_vectors(cx, s):
+    let e = slen(s)
+    let p = 0
+    while p < e:
+        let le = p
+        while le < e and u8(s + le) != 10:
+            le = le + 1
+        let f1 = field(s, p, le)
+        let f2 = field(s, f1 + 1, le)
+        let f3 = field(s, f2 + 1, le)
+        let kind = s + p
+        if same(kind, f1 - p, "format") == 1 or same(kind, f1 - p, "bare") == 1:
+            let bare = same(kind, f1 - p, "bare")
+            put_n(cx, s + p, f2 - p)
+            putc(cx, 9)
+            let q = scan_token(cx, s, f1 + 1, f2)
+            let tk = u8(load(cx + 28) + 56)
+            if bare == 0:
+                put_n(cx, s + f2 + 1, f3 - f2 - 1)
+                putc(cx, 9)
+            let r = 0
+            let first = 1
+            while r < readings_of(tk) and q == f2:
+                let ok = applies(cx, tk, r, 1)
+                if ok == 1 and bare == 1 and tk == 0:
+                    ok = in_window(cx)
+                if ok == 1 and (bare == 1 or same(s + f2 + 1, f3 - f2 - 1, reading_id_of(cx, tk, r)) == 1):
+                    if first == 0:
+                        putc(cx, 32)
+                    if bare == 1:
+                        put(cx, reading_id_of(cx, tk, r))
+                        putc(cx, 61)
+                    put_time(cx, load64(cx + 64), load64(cx + 72), load(cx + 80), 84, 1)
+                    first = 0
+                r = r + 1
+            putc(cx, 10)
+        elif same(kind, f1 - p, "now") == 1:
+            put_n(cx, s + p, f2 - p)
+            putc(cx, 10)
+            if scan_date(cx, s, f1 + 1, f2) == f2 and date_applies(cx, 0) == 1:
+                store64(cx + 208, load64(cx + 64))
+        elif same(kind, f1 - p, "zone") == 1:
+            put_n(cx, s + p, f3 - p)
+            putc(cx, 9)
+            scan_date(cx, s, f1 + 1, f2)
+            date_applies(cx, 0)
+            let zn = alloc(f3 - f2)
+            mem_copy(zn, s + f2 + 1, f3 - f2 - 1)
+            store8(zn + f3 - f2 - 1, 0)
+            let zi = index_of(cx, zn)
+            if zi >= 0:
+                let z = zone_obj(cx, zrecord(cx, zi))
+                let ty = zone_type(z, load64(cx + 64))
+                if ty >= 0:
+                    let off = load(load(z + 4) + ty * 4)
+                    put_time(cx, load64(cx + 64) + i64(off), load64(cx + 72), load(cx + 80), 84, 0)
+                    putc(cx, 9)
+                    put_offset(cx, off, 0)
+                    putc(cx, 9)
+                    put(cx, load(load(z + 12) + ty * 4))
+            putc(cx, 10)
+        elif same(kind, f1 - p, "pick") == 1:
+            # "pick <one name, as typed after --in> <the zones it chooses, in order>"
+            put_n(cx, s + p, f2 - p)
+            putc(cx, 9)
+            store(cx + 12, 0)
+            if add_named(cx, s + f1 + 1, f2 - f1 - 1) == 1:
+                let k = 0
+                while k < load(cx + 12):
+                    if k > 0:
+                        putc(cx, 32)
+                    put(cx, zname(cx, load(load(cx + 8) + k * 4)))
+                    k = k + 1
+            putc(cx, 10)
+        elif same(kind, f1 - p, "find") == 1:
+            put_n(cx, s + p, f2 - p)
+            putc(cx, 9)
+            let t = text_next(cx, s, f1 + 1, f2)
+            let many = 0
+            while t >= 0:
+                if many == 1:
+                    put(cx, " | ")
+                let a = load(load(cx + 28) + 48)
+                put_n(cx, s + a, t - a)
+                many = 1
+                t = text_next(cx, s, t, f2)
+            putc(cx, 10)
+        p = le + 1
+    return 0

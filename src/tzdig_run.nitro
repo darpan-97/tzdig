@@ -1,0 +1,209 @@
+module tzdig_run
+
+import std
+import std_io
+import os
+import tzdig_core
+
+# tzdig_run -- everything `tzdig` does between its words and its output, shared by the two entries:
+# src/tzdig.nitro passes the command line's arguments, src/tzdig_web.nitro passes none. Options come
+# from the arguments where the build has a command line -- every build but the web page. Where it
+# does not (the page's wasm, or anything that can only pipe text), from a first line of the input
+# that starts with "#tzdig", written exactly like the arguments, quotes included:
+#     #tzdig --in "est, au sydney" --json
+
+fn eq(a, b):
+    let i = 0
+    while u8(a + i) != 0 and u8(a + i) == u8(b + i):
+        i = i + 1
+    if u8(a + i) == u8(b + i):
+        return 1
+    return 0
+
+fn two_letters(s):                            # a country code: "au", "US"
+    let a = u8(s)
+    let b = u8(s + 1)
+    if u8(s + 2) == 0 and ((a >= 65 and a <= 90) or (a >= 97 and a <= 122)) and ((b >= 65 and b <= 90) or (b >= 97 and b <= 122)):
+        return 1
+    return 0
+
+fn copy(src, n):
+    let s = alloc(n + 1)
+    mem_copy(s, src, n)
+    store8(s + n, 0)
+    return s
+
+fn usage(w):
+    bufw_puts(w, "usage: tzdig [--in ZONES] [--json] [--all] [--year YEAR] [VALUE ...]\n")
+    bufw_puts(w, "       tzdig --zones [CODE]\n")
+    bufw_puts(w, "  VALUE        a timestamp; with none, the text on standard input is searched\n")
+    bufw_puts(w, "  --in ZONES   also show these zones, comma-separated: a country code (au: all of\n")
+    bufw_puts(w, "               Australia's zones), a city (sydney), an IANA name (Europe/Paris) or\n")
+    bufw_puts(w, "               an abbreviation (est, aest)\n")
+    bufw_puts(w, "  --json       one JSON object per timestamp found\n")
+    bufw_puts(w, "  --all        every reading of a number, not only those in 1990-2040\n")
+    bufw_puts(w, "  --year YEAR  the year of dates written without one (syslog's Sep 23 15:27:40);\n")
+    bufw_puts(w, "               otherwise the latest year that does not put them in the future\n")
+    bufw_puts(w, "  --zones      every country code and country; with a CODE, that country's zones\n")
+    return 0
+
+fn read_all():
+    let cap = 65536
+    let buf = alloc(cap + 1)
+    let n = 0
+    let go = 1
+    while go == 1:
+        if n >= cap:
+            let nb = alloc(cap * 2 + 1)
+            mem_copy(nb, buf, n)
+            buf = nb
+            cap = cap * 2
+        let got = read(0, buf + n, cap - n)
+        if got <= 0:
+            go = 0
+        else:
+            n = n + got
+    store8(buf + n, 0)
+    return buf
+
+# the options in a list of words, wherever they are; the other words are values, moved to the
+# front of the list. Returns how many values there are, or -1 after --help.
+# st: @0 flags  @4 zones  @8 1 for --vectors  @12 1 for --zones  @16 its country code, or 0
+#     @20 --year, 0 for none, -1 for one that is not a year
+fn options(words, count, st):
+    let nv = 0
+    let i = 0
+    while i < count:
+        let a = load(words + i * 4)
+        if eq(a, "--in") == 1 and i + 1 < count:
+            store(st + 4, load(words + (i + 1) * 4))
+            i = i + 1
+        elif eq(a, "--json") == 1:
+            store(st, load(st) | 1)
+        elif eq(a, "--all") == 1:
+            store(st, load(st) | 2)
+        elif eq(a, "--vectors") == 1:
+            store(st + 8, 1)
+        elif eq(a, "--zones") == 1:
+            store(st + 12, 1)
+            if i + 1 < count and two_letters(load(words + (i + 1) * 4)) == 1:
+                store(st + 16, load(words + (i + 1) * 4))
+                i = i + 1
+        elif eq(a, "--year") == 1 and i + 1 < count:
+            store(st + 20, year_of(load(words + (i + 1) * 4)))
+            i = i + 1
+        elif eq(a, "--help") == 1 or eq(a, "-h") == 1:
+            return 0 - 1
+        else:
+            store(words + nv * 4, a)
+            nv = nv + 1
+        i = i + 1
+    return nv
+
+fn year_of(s):                                # "2024" -> 2024; -1 for anything but a year from 1 to 9999
+    let v = 0
+    let i = 0
+    while u8(s + i) >= 48 and u8(s + i) <= 57:
+        v = v * 10 + u8(s + i) - 48
+        i = i + 1
+    if i == 0 or i > 4 or u8(s + i) != 0 or v == 0:
+        return 0 - 1
+    return v
+
+pub fn tzdig_copy(src, n):
+    return copy(src, n)
+
+# the whole run over a list of words (the arguments, or none). Returns the exit status: 0, or 2
+# when a zone name is not one.
+pub fn tzdig_run(words, argc):
+    let w = bufw_new(1, 65536)
+    let cx = tzdig_new(w)
+    let st = alloc(24)
+    store(st, 0)
+    store(st + 20, 0)
+    store(st + 4, 0)
+    store(st + 8, 0)
+    store(st + 12, 0)
+    store(st + 16, 0)
+    let nv = options(words, argc, st)
+    let text = 0
+    if nv == 0 and load(st + 8) == 0 and load(st + 12) == 0:   # --zones reads nothing
+        text = read_all()
+        # "#tzdig ..." on the first line: the options of a build that has no arguments
+        let m = u8(text + 6)                  # after the marker: a space or the end of the line
+        if u8(text) == 35 and u8(text + 1) == 116 and u8(text + 2) == 122 and u8(text + 3) == 100 and u8(text + 4) == 105 and u8(text + 5) == 103 and (m == 32 or m == 10 or m == 13 or m == 0):
+            let e = 0
+            while u8(text + e) != 0 and u8(text + e) != 10:
+                e = e + 1
+            let lw = alloc(4 * 32)
+            let lc = 0
+            let p = 6
+            while p < e and lc < 32:
+                while p < e and (u8(text + p) == 32 or u8(text + p) == 13):
+                    p = p + 1
+                let q = p
+                let quote = 0
+                if p < e and (u8(text + p) == 34 or u8(text + p) == 39):
+                    quote = u8(text + p)
+                if quote != 0:                # "au sydney" or 'au sydney': one word, as a shell reads it
+                    p = p + 1
+                    q = p
+                    while q < e and u8(text + q) != quote:
+                        q = q + 1
+                    store(lw + lc * 4, copy(text + p, q - p))
+                    lc = lc + 1
+                    if q < e:
+                        q = q + 1
+                else:
+                    while q < e and u8(text + q) != 32 and u8(text + q) != 13:
+                        q = q + 1
+                    if q > p:
+                        store(lw + lc * 4, copy(text + p, q - p))
+                        lc = lc + 1
+                p = q
+            if options(lw, lc, st) < 0:
+                nv = 0 - 1
+            if u8(text + e) == 10:
+                e = e + 1
+            text = text + e
+    if nv < 0:
+        usage(w)
+        bufw_flush(w)
+        return 0
+    tzdig_set_flags(cx, load(st))
+    tzdig_set_now(cx, i64(os_now()))
+    if load(st + 20) < 0:
+        bufw_puts(w, "tzdig: --year takes a year, as in --year 2024\n")
+        bufw_flush(w)
+        return 2
+    tzdig_set_year(cx, load(st + 20))
+    if load(st + 12) == 1:
+        let listed = tzdig_list(cx, load(st + 16))
+        bufw_flush(w)
+        if listed == 0:
+            return 2
+        return 0
+    if load(st + 4) != 0:
+        if tzdig_zones(cx, load(st + 4)) == 0:
+            bufw_flush(w)
+            return 2
+    if load(st + 8) == 1:
+        if text == 0:
+            text = read_all()
+        tzdig_vectors(cx, text)
+    elif nv > 0:
+        let i = 0
+        while i < nv:
+            # a value with more around it -- Go's "... +0000 UTC m=+0.000000001", a photo's file
+            # name -- is searched like any text
+            if tzdig_value(cx, load(words + i * 4)) == 0:
+                if tzdig_scan(cx, load(words + i * 4)) == 0:
+                    bufw_puts(w, "tzdig: not a timestamp: ")
+                    bufw_puts(w, load(words + i * 4))
+                    bufw_puts(w, "\n")
+            i = i + 1
+    else:
+        tzdig_text(cx, text)
+    bufw_flush(w)
+    return 0
+

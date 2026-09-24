@@ -1,0 +1,3 @@
+# build output: bash build.sh remakes all of it
+dist/
+__pycache__/

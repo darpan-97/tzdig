@@ -1,0 +1,31 @@
+# The web pages on GitHub Pages: web/index.html (the desktop page) at the site's root and
+# web/mobile.html (the phone page) beside it. build.sh makes both on a machine with the nitro
+# toolchain and they are committed; this only publishes them, so the site is always the committed
+# pages and nothing else (not the templates they are made from).
+name: pages
+on:
+  push:
+    branches: [main]
+    paths: ["web/index.html", "web/mobile.html", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir _site && cp web/index.html web/mobile.html _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

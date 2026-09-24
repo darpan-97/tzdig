@@ -1,0 +1,21 @@
+import std
+import os
+import tzdig_run
+
+# tzdig -- the command line. It only collects the arguments; src/tzdig_run.nitro does the rest.
+
+fn main():
+    let argc = os_argc()
+    let words = alloc(4 * argc + 4)
+    let arg = alloc(4096)
+    let i = 0
+    while i < argc:
+        let n = os_arg(i, arg, 4095)
+        store(words + i * 4, tzdig_copy(arg, n))
+        i = i + 1
+    let status = tzdig_run(words, argc)
+    if status != 0:
+        exit(status)
+    return 0
+
+main()

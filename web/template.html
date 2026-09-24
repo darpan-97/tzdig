@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tzdig</title>
+<meta name="description" content="Paste a timestamp or a log line; get UTC and the local time in any zone, with the right daylight-saving rules. Runs in your browser.">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5d6778; --line: #d9dee6;
+    --accent: #1f6feb; --accent-ink: #ffffff; --code-bg: #f1f3f6; --warn: #9a3412;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1318; --panel: #161b22; --ink: #e6ebf1; --muted: #9aa4b2; --line: #2b3440;
+      --accent: #4c8dff; --accent-ink: #0b1220; --code-bg: #11161d; --warn: #fdba74;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1318; --panel: #161b22; --ink: #e6ebf1; --muted: #9aa4b2; --line: #2b3440;
+    --accent: #4c8dff; --accent-ink: #0b1220; --code-bg: #11161d; --warn: #fdba74;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 40px; display: grid; gap: 16px; }
+  header h1 { margin: 0; font-size: 26px; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); max-width: 70ch; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; }
+  .field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); flex: 1 1 280px; }
+  .picker { position: relative; flex: 1 1 240px; }
+  #found {
+    position: absolute; z-index: 10; top: 100%; left: 0; right: 0; margin: 4px 0 0; padding: 4px;
+    list-style: none; max-height: min(360px, 60vh); overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+  }
+  #found li {
+    /* the name keeps its words and at most about half the row; the description wraps in the rest */
+    display: grid; grid-template-columns: 2.4em fit-content(55%) minmax(0, 1fr); gap: 10px; align-items: baseline;
+    padding: 5px 8px; border-radius: 5px; cursor: pointer; font-size: 14px; color: var(--ink);
+  }
+  #found li[aria-selected="true"] { background: var(--code-bg); box-shadow: inset 0 0 0 1px var(--accent); }
+  #found .code { font: 12.5px ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--muted); }
+  #found .what { overflow-wrap: break-word; }
+  #found .country .what { font-weight: 600; }
+  #found .more { color: var(--muted); font-size: 12.5px; text-align: right; }
+  #found li.hint { display: block; cursor: default; color: var(--muted); font-size: 13px; }
+  input[type="text"] {
+    font: 14px ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--ink);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  }
+  .toggles { display: flex; gap: 16px; font-size: 14px; }
+  .toggles label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  .panes { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  @media (min-width: 980px) { .panes { grid-template-columns: 1fr 1fr; } }
+  .pane { display: grid; gap: 6px; grid-template-rows: auto 1fr; min-width: 0; }
+  .pane-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--muted); }
+  textarea, pre {
+    margin: 0; min-height: 320px; width: 100%; padding: 12px; border-radius: 8px;
+    font: 13.5px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    border: 1px solid var(--line); color: var(--ink);
+  }
+  textarea { background: var(--panel); resize: vertical; }
+  pre { background: var(--code-bg); overflow: auto; white-space: pre; }
+  pre.error { color: var(--warn); }
+  button {
+    font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    border-radius: 6px; padding: 3px 10px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  footer { color: var(--muted); font-size: 13px; }
+  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.95em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>tzdig</h1>
+    <p>Paste a timestamp, or a whole log line or JSON event. Every timestamp in it is shown in UTC and in
+    the zones you name, with the daylight-saving rules for that date.</p>
+  </header>
+
+  <div class="controls">
+    <label class="field">Also show these zones: a country code, a code and a city, an IANA name, or an abbreviation
+      <input id="zones" type="text" spellcheck="false" autocomplete="off" placeholder="est, AU Sydney, in, Europe/Paris">
+    </label>
+    <div class="field picker">
+      <label for="find">Add a country or one of its zones</label>
+      <input id="find" type="text" spellcheck="false" autocomplete="off" placeholder="australia, sydney, NZ, kolkata"
+        role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="found">
+      <ul id="found" role="listbox" aria-label="Countries and zones" hidden></ul>
+    </div>
+    <div class="toggles">
+      <label><input id="json" type="checkbox"> JSON</label>
+      <label><input id="all" type="checkbox"> every reading</label>
+    </div>
+  </div>
+
+  <div class="panes">
+    <div class="pane">
+      <div class="pane-head"><span>Input</span><button id="example" type="button">Try an example</button></div>
+      <textarea id="input" spellcheck="false" placeholder="1727104445123&#10;133712345678901234&#10;{&quot;ts&quot;:1727104445123,&quot;logon&quot;:&quot;2024-09-23T20:44:05.123+05:30&quot;}"></textarea>
+    </div>
+    <div class="pane">
+      <div class="pane-head"><span>Result</span><span id="status"></span></div>
+      <pre id="output" aria-live="polite"></pre>
+    </div>
+  </div>
+
+  <footer>
+    Runs entirely in this page: nothing you paste is sent anywhere. Time zone rules: IANA {{IANA}}, 1970&ndash;2069.
+    A bare number can mean several things, so every reading between 1990 and 2040 is shown.
+  </footer>
+</main>
+
+<script>
+"use strict";
+// tzdig.wasm, built from src/tzdig_web.nitro by build.sh, base64 so this one file works from disk too
+const WASM = "{{WASM_BASE64}}";
+let compiled = null;
+
+function wasmModule() {
+  if (!compiled) {
+    const bin = atob(WASM);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    compiled = WebAssembly.compile(bytes);
+  }
+  return compiled;
+}
+
+// One run of the program: text in on its standard input, what it writes out. A fresh instance
+// each time, so no run sees another's memory.
+async function runWhen(text) {
+  const mod = await wasmModule();
+  const input = new TextEncoder().encode(text);
+  const decoder = new TextDecoder();
+  const out = [];
+  let cur = 0, memory = null;
+  const env = {
+    print: (x) => out.push(String(x | 0) + "\n"),
+    print_f64: (x) => out.push(String(x) + "\n"),
+    print_i64: (x) => out.push(String(x) + "\n"),
+    read: (fd, ptr, len) => {
+      if (fd !== 0) return -1;
+      const m = new Uint8Array(memory.buffer);
+      let i = 0;
+      while (i < len && cur < input.length) m[ptr + i++] = input[cur++];
+      return i;
+    },
+    write: (fd, ptr, len) => {
+      if (fd !== 1 && fd !== 2) return -1;
+      // stream: a character split across two writes ("Côte" at a buffer's end) is kept whole
+      out.push(decoder.decode(new Uint8Array(memory.buffer, ptr, len).slice(), { stream: true }));
+      return len;
+    },
+    open: () => -1,
+    close: () => -1,
+    // 55 is the clock: the year of a date written without one (syslog's Sep 23 15:27:40)
+    host_call: (id) => (id === 55 ? Math.floor(Date.now() / 1000) | 0 : -1),
+  };
+  const instance = await WebAssembly.instantiate(mod, { env });
+  memory = instance.exports.memory;
+  instance.exports.main();
+  out.push(decoder.decode());
+  return out.join("");
+}
+
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem("tzdig." + k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem("tzdig." + k, v); } catch (e) { /* private mode: fine */ } },
+};
+
+// the options travel on a first "#tzdig" line, exactly as they would on a command line
+function optionsLine() {
+  let line = "#tzdig";
+  const zones = $("zones").value.split(",").map((z) => z.trim().replace(/\s+/g, "_")).filter(Boolean);
+  if (zones.length) line += " --in " + zones.join(",");
+  if ($("json").checked) line += " --json";
+  if ($("all").checked) line += " --all";
+  return line;
+}
+
+let generation = 0;
+async function update() {
+  const text = $("input").value;
+  const mine = ++generation;
+  if (!text.trim()) {
+    $("output").textContent = "";
+    $("output").className = "";
+    $("status").textContent = "";
+    return;
+  }
+  const started = performance.now();
+  try {
+    const result = await runWhen(optionsLine() + "\n" + text);
+    if (mine !== generation) return;
+    $("output").textContent = result;
+    $("output").className = "";
+    $("status").textContent = Math.round(performance.now() - started) + " ms";
+  } catch (e) {
+    if (mine !== generation) return;
+    $("output").textContent = "tzdig stopped: " + (e && e.message ? e.message : String(e));
+    $("output").className = "error";
+    $("status").textContent = "";
+  }
+}
+
+let timer = 0;
+function soon() {
+  clearTimeout(timer);
+  timer = setTimeout(update, 120);
+}
+
+// ---- the picker ----------------------------------------------------------------------------------
+// Every country, by its ISO 3166 alpha-2 code, and each of its zones, as the program itself lists
+// them (--zones --json): the page keeps no zone list of its own. Picking one adds it to the zones.
+const fold = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();   // "Côte" -> "cote"
+let places = null;
+function loadPlaces() {
+  if (!places) {
+    places = runWhen("#tzdig --zones --json\n").then((text) => {
+      const list = [];
+      for (const c of JSON.parse(text)) {
+        const n = c.zones.length;
+        list.push({ country: true, code: c.code, what: c.country, value: c.code,
+                    more: n === 1 ? "1 zone" : n === 2 ? "both zones" : "all " + n + " zones",
+                    hay: c.code + " " + c.country });
+        for (const z of c.zones) {
+          const city = z.zone.slice(z.zone.lastIndexOf("/") + 1).replace(/_/g, " ");
+          list.push({ country: false, code: c.code, what: city, value: c.code + " " + city,
+                      more: z.note || c.country, hay: [c.code, city, z.zone, z.note, c.country].join(" ") });
+        }
+      }
+      for (const p of list) {
+        p.hay = fold(p.hay);
+        p.words = p.hay.split(/[^a-z0-9]+/).filter(Boolean);
+      }
+      return list;
+    });
+    places.catch(() => { places = null; });           // tried again on the next key
+  }
+  return places;
+}
+
+// every word typed must appear; a country whose code it is comes first, then words that start a
+// word ("syd" in Sydney) before words inside one, countries before zones, and the table's order
+function search(list, query) {
+  const q = fold(query);
+  const words = q.split(/[^a-z0-9]+/).filter(Boolean);
+  const code = q === "uk" ? "gb" : q;
+  const rank = (p) => {
+    if (p.country && p.code.toLowerCase() === code) return 0;
+    const starts = words.every((w) => p.words.some((h) => h.startsWith(w)));
+    return (starts ? 1 : 3) + (p.country ? 0 : 1);
+  };
+  return list
+    .filter((p) => words.length && words.every((w) => p.hay.includes(w)))
+    .map((p, i) => ({ p, i, r: rank(p) }))
+    .sort((a, b) => a.r - b.r || a.i - b.i)
+    .map((x) => x.p);
+}
+
+const SHOWN = 60;
+let shown = [];
+let active = -1;
+
+function hint(ul, text) {
+  const li = document.createElement("li");
+  li.className = "hint";
+  li.setAttribute("role", "option");
+  li.setAttribute("aria-disabled", "true");
+  li.textContent = text;
+  ul.append(li);
+}
+
+function show(extra, query) {
+  const ul = $("found");
+  ul.replaceChildren();
+  shown.forEach((p, i) => {
+    const li = document.createElement("li");
+    li.id = "place-" + i;
+    li.dataset.i = i;
+    li.className = p.country ? "country" : "zone";
+    li.setAttribute("role", "option");
+    for (const [cls, text] of [["code", p.code], ["what", p.what], ["more", p.more]]) {
+      const span = document.createElement("span");
+      span.className = cls;
+      span.textContent = text;
+      li.append(span);
+    }
+    li.addEventListener("click", () => choose(p));
+    ul.append(li);
+  });
+  if (query && !shown.length) hint(ul, "Nothing matches “" + query + "”: try a country, its two-letter code, or a city");
+  if (extra > 0) hint(ul, "and " + extra + " more: keep typing");
+  ul.hidden = !query;
+  $("find").setAttribute("aria-expanded", query ? "true" : "false");
+  mark();
+}
+
+function mark() {
+  $("found").querySelectorAll("li[data-i]").forEach((li) =>
+    li.setAttribute("aria-selected", Number(li.dataset.i) === active ? "true" : "false"));
+  const cur = active >= 0 ? $("place-" + active) : null;
+  if (cur) {
+    $("find").setAttribute("aria-activedescendant", cur.id);
+    cur.scrollIntoView({ block: "nearest" });
+  } else {
+    $("find").removeAttribute("aria-activedescendant");
+  }
+}
+
+async function find() {
+  const query = $("find").value.trim();
+  let list = [];
+  if (query) {
+    try { list = await loadPlaces(); } catch (e) { return; }
+    if ($("find").value.trim() !== query) return;     // typed on meanwhile
+  }
+  const all = query ? search(list, query) : [];
+  shown = all.slice(0, SHOWN);
+  active = shown.length ? 0 : -1;
+  show(all.length - shown.length, query);
+}
+
+function choose(p) {
+  const zones = $("zones").value.split(",").map((z) => z.trim()).filter(Boolean);
+  if (!zones.some((z) => z.toLowerCase() === p.value.toLowerCase())) zones.push(p.value);
+  $("zones").value = zones.join(", ");
+  store.set("zones", $("zones").value);
+  $("find").value = "";
+  find();
+  update();
+}
+
+$("find").addEventListener("input", find);
+$("find").addEventListener("focus", () => {
+  loadPlaces().catch(() => {});                       // ready before the first key
+  if ($("find").value.trim()) find();
+});
+$("find").addEventListener("blur", () => {
+  $("found").hidden = true;
+  $("find").setAttribute("aria-expanded", "false");
+});
+$("find").addEventListener("keydown", (e) => {
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && shown.length) {
+    e.preventDefault();
+    active = (active + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length;
+    mark();
+  } else if (e.key === "Enter" && active >= 0) {
+    e.preventDefault();
+    choose(shown[active]);
+  } else if (e.key === "Escape") {
+    $("find").value = "";
+    find();
+  }
+});
+// pressing on the list keeps the focus in the box, so the list is still there when the click lands
+$("found").addEventListener("mousedown", (e) => e.preventDefault());
+
+const EXAMPLE = [
+  '{"timestamp":1727104445123,"process":"powershell.exe","user":"CORP\\\\alice",',
+  ' "logon_time":"2024-09-23T20:44:05.123+05:30","pwdLastSet":133712345678901234}',
+  "Date: Mon, 23 Sep 2024 11:14:05 -0400",
+  "zeek conn 1727104445.123456 10.0.0.15 -> 93.184.216.34",
+].join("\n");
+
+$("zones").value = store.get("zones") ?? "est, aest";
+$("json").checked = store.get("json") === "1";
+$("all").checked = store.get("all") === "1";
+$("zones").addEventListener("input", () => { store.set("zones", $("zones").value); soon(); });
+$("json").addEventListener("change", () => { store.set("json", $("json").checked ? "1" : "0"); soon(); });
+$("all").addEventListener("change", () => { store.set("all", $("all").checked ? "1" : "0"); soon(); });
+$("input").addEventListener("input", soon);
+$("example").addEventListener("click", () => { $("input").value = EXAMPLE; update(); });
+</script>
+</body>
+</html>

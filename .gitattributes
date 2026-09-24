@@ -1,0 +1,3 @@
+# LF everywhere, on every platform: build.sh breaks under bash with CRLF, and the generated files
+# (src/zones.nitro, tests/vectors.tsv, web/index.html) are written with LF by their generators.
+* text=auto eol=lf
