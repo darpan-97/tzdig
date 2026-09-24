@@ -6,24 +6,28 @@
 <title>tzdig</title>
 <meta name="description" content="Paste a timestamp or a log line; get UTC and the local time in any zone, with the right daylight-saving rules. Runs in your browser.">
 <style>
+  /* a day's sky: night, early or late (amber), working hours (sky blue); the accent is the sky */
   :root {
-    --bg: #f5f6f8; --panel: #ffffff; --ink: #1b2230; --muted: #5b6577; --line: #d8dde5;
-    --accent: #1f6feb; --accent-ink: #ffffff; --accent-soft: #e8f0fe; --code-bg: #f0f2f5;
-    --note: #7a4a00; --note-bg: #fff5dc; --note-line: #efd8a6;
+    --bg: #f2f5f8; --panel: #ffffff; --ink: #132132; --muted: #58697b; --line: #d5dde7;
+    --accent: #0a6d97; --accent-ink: #ffffff; --accent-soft: #e0f0f7; --code-bg: #edf1f5;
+    --note: #7a4a00; --note-bg: #fff3d6; --note-line: #efd29a;
+    --night: #2d3f63; --dawn: #efae57; --work: #9ccdec; --tick: #132132;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #0e1217; --panel: #161b22; --ink: #e6ebf1; --muted: #98a2b0; --line: #2a333f;
-      --accent: #4c8dff; --accent-ink: #0b1220; --accent-soft: #172338; --code-bg: #11161d;
-      --note: #f0c479; --note-bg: #272010; --note-line: #4a3b1d;
+      --bg: #0a121e; --panel: #111a28; --ink: #e6edf5; --muted: #91a2b7; --line: #223047;
+      --accent: #6cc4ea; --accent-ink: #061320; --accent-soft: #10273a; --code-bg: #0e1724;
+      --note: #f2c77e; --note-bg: #251d0f; --note-line: #493a1c;
+      --night: #1d2d4c; --dawn: #d9913f; --work: #3f8fc2; --tick: #f4f7fb;
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
-    --bg: #0e1217; --panel: #161b22; --ink: #e6ebf1; --muted: #98a2b0; --line: #2a333f;
-    --accent: #4c8dff; --accent-ink: #0b1220; --accent-soft: #172338; --code-bg: #11161d;
-    --note: #f0c479; --note-bg: #272010; --note-line: #4a3b1d;
+    --bg: #0a121e; --panel: #111a28; --ink: #e6edf5; --muted: #91a2b7; --line: #223047;
+    --accent: #6cc4ea; --accent-ink: #061320; --accent-soft: #10273a; --code-bg: #0e1724;
+    --note: #f2c77e; --note-bg: #251d0f; --note-line: #493a1c;
+    --night: #1d2d4c; --dawn: #d9913f; --work: #3f8fc2; --tick: #f4f7fb;
     color-scheme: dark;
   }
   * { box-sizing: border-box; }
@@ -31,8 +35,16 @@
   main { max-width: 980px; margin: 0 auto; padding: 22px 16px 40px; display: grid; gap: 18px; }
   .mono, code, textarea, .t { font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace; }
   header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
-  header h1 { margin: 0; font-size: 26px; letter-spacing: -0.01em; }
-  header p { margin: 2px 0 0; color: var(--muted); }
+  header h1 { margin: 0; font: 700 30px/1.1 ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace; letter-spacing: -0.03em; }
+  header h1 .tz { color: var(--accent); }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  /* the sky over one day, midnight to midnight, with a tick at "now" where this page is open */
+  .sky {
+    position: relative; height: 5px;
+    background: linear-gradient(90deg, #0b1a33 0%, #2e3a6e 17%, #f08a4b 26%, #fbd38d 32%, #8fd0f5 42%, #8fd0f5 66%,
+      #fbd38d 72%, #f08a4b 78%, #2e3a6e 86%, #0b1a33 100%);
+  }
+  .sky i { position: absolute; top: -2px; width: 3px; height: 9px; margin-left: -1.5px; background: #ffffff; box-shadow: 0 0 0 1px #0b1a33; border-radius: 1px; }
   header a { color: var(--muted); font-size: 13px; }
   a { color: var(--accent); }
   button {
@@ -109,8 +121,14 @@
   .notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
   .notes li { font-size: 13.5px; color: var(--note); background: var(--note-bg); border-radius: 6px; padding: 3px 8px; justify-self: start; }
   .rows { display: grid; gap: 2px; }
-  /* place | time | date | zone | copy */
-  .row { display: grid; grid-template-columns: minmax(110px, 180px) max-content max-content minmax(0, 1fr) auto; gap: 4px 16px; align-items: baseline; padding: 6px 4px; border-top: 1px solid var(--line); }
+  /* place | time | date | where in the day | zone | copy */
+  .row { display: grid; grid-template-columns: minmax(110px, 180px) max-content max-content max-content minmax(0, 1fr) auto; gap: 4px 16px; align-items: baseline; padding: 6px 4px; border-top: 1px solid var(--line); }
+  .dayw {
+    position: relative; align-self: center; width: 72px; height: 7px; border-radius: 4px;
+    background: linear-gradient(90deg, var(--night) 0 25%, var(--dawn) 25% 33.33%, var(--work) 33.33% 75%,
+      var(--dawn) 75% 83.33%, var(--night) 83.33% 100%);
+  }
+  .dayw i { position: absolute; top: -3px; width: 3px; height: 13px; margin-left: -1.5px; background: var(--tick); border-radius: 2px; box-shadow: 0 0 0 1.5px var(--panel); }
   .row:first-child { border-top: 0; }
   .row .place { font-size: 14px; }
   .row .t { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
@@ -118,10 +136,11 @@
   .row .z { color: var(--muted); font-size: 13px; }
   .row .copy { justify-self: end; }
   .row.utc .t { color: var(--accent); }
-  @media (max-width: 620px) {                /* place on its own line; time, date, copy; then the zone */
+  @media (max-width: 620px) {                /* place on its own line; time, date, copy; then the day and the zone */
     .row { grid-template-columns: max-content minmax(0, 1fr) auto; gap: 2px 12px; }
     .row .place { grid-column: 1 / -1; font-weight: 600; }
-    .row .z { grid-column: 1 / 3; grid-row: 3; }
+    .row .dayw { grid-column: 1; grid-row: 3; }
+    .row .z { grid-column: 2 / 4; grid-row: 3; }
     .row .copy { grid-column: 3; grid-row: 2; }
   }
   pre.raw { margin: 0; padding: 12px; background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; }
@@ -136,11 +155,12 @@
 </style>
 </head>
 <body>
+<div class="sky" id="sky" aria-hidden="true"></div>
 <main>
   <header>
     <div>
-      <h1>tzdig</h1>
-      <p>Paste a timestamp or a whole log. See it in UTC and in the places you choose.</p>
+      <h1><span class="tz">tz</span>dig</h1>
+      <p>Dig the time out of any timestamp or log: UTC, and every place you choose.</p>
     </div>
     <a href="https://github.com/darpan-97/tzdig">tzdig on GitHub</a>
   </header>
@@ -461,10 +481,25 @@ async function copyText(text, btn) {
   btn.textContent = ok ? "Copied" : "Copy failed";
   setTimeout(() => { btn.textContent = was; }, 1200);
 }
+// where a local time falls in its day: night, early or late, or working hours, as a small bar
+function dayBar(t) {
+  const bar = el("span", "dayw");
+  const m = /T(\d\d):(\d\d)/.exec(t || "");
+  if (!m) { bar.style.visibility = "hidden"; return bar; }
+  const h = +m[1] + +m[2] / 60;
+  const tick = el("i");
+  tick.style.left = (h / 24 * 100).toFixed(2) + "%";
+  bar.append(tick);
+  const when = h < 6 || h >= 20 ? "night there" : h >= 8 && h < 18 ? "working hours there" : "early or late there";
+  bar.title = when;
+  bar.setAttribute("aria-label", when);
+  bar.setAttribute("role", "img");
+  return bar;
+}
 function row(cls, place, t, zoneText, copyLine) {
   const r = el("div", "row " + cls);
   const p = parts(t);
-  r.append(el("span", "place", place), el("span", "t", p ? p.time : t), el("span", "d", p ? p.date : ""), el("span", "z", zoneText));
+  r.append(el("span", "place", place), el("span", "t", p ? p.time : t), el("span", "d", p ? p.date : ""), dayBar(t), el("span", "z", zoneText));
   const b = el("button", "copy", "Copy");
   b.type = "button";
   b.setAttribute("aria-label", "Copy the time in " + place);
@@ -597,7 +632,8 @@ async function update() {
         const s = line.trim();
         if (!s) continue;
         if (s[0] === "{") { try { found.push(JSON.parse(s)); continue; } catch (e) { /* not a row */ } }
-        const m = s.replace(/^tzdig: /, "");
+        const m = s.replace(/^tzdig: /, "").replace(/^no timestamp found \(it reads (.*)\)$/,
+          "Nothing dug up here. tzdig reads $1.");
         messages.push(m[0].toUpperCase() + m.slice(1));
       }
     }
@@ -657,6 +693,17 @@ loadPlaces().then(() => {
 $("input").value = "1727104445123";
 $("exampleTag").hidden = false;
 update();
+
+// "now", where this page is open, on the sky band: moved each minute
+function skyNow() {
+  const d = new Date();
+  let tick = $("sky").querySelector("i");
+  if (!tick) { tick = el("i"); $("sky").append(tick); }
+  tick.style.left = ((d.getHours() + d.getMinutes() / 60) / 24 * 100).toFixed(2) + "%";
+  $("sky").title = "Now, here: " + d.toTimeString().slice(0, 5);
+}
+skyNow();
+setInterval(skyNow, 60000);
 </script>
 </body>
 </html>
