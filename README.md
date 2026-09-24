@@ -1,5 +1,7 @@
 # tzdig
 
+**[Open tzdig in your browser](https://darpan-97.github.io/tzdig/)** · [on a phone](https://darpan-97.github.io/tzdig/mobile.html) · [download for Windows](https://github.com/darpan-97/tzdig/releases/latest/download/tzdig.exe)
+
 Convert timestamps between formats and time zones. Give it a value or a whole log, and get UTC and
 the local time in any zone, with the daylight-saving rules for that date.
 
