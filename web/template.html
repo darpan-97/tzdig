@@ -105,6 +105,7 @@
   .card-h .fmt { font-weight: 600; }
   .card-h .line { color: var(--muted); font-size: 13px; margin-left: auto; }
   .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .seg button.unlikely:not([aria-pressed="true"]) { color: var(--muted); border-style: dashed; }
   .notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
   .notes li { font-size: 13.5px; color: var(--note); background: var(--note-bg); border-radius: 6px; padding: 3px 8px; justify-self: start; }
   .rows { display: grid; gap: 2px; }
@@ -171,7 +172,7 @@
   <details class="more">
     <summary>More options</summary>
     <div class="opts">
-      <label><input id="all" type="checkbox"> Every reading of a number, not only those in 1990 to 2040</label>
+      <label><input id="all" type="checkbox"> Also show unlikely readings of numbers (outside 1990 to 2040)</label>
       <span class="seg" id="view" role="group" aria-label="Show results as">
         <button type="button" data-view="cards">Cards</button>
         <button type="button" data-view="text">Text</button>
@@ -472,12 +473,21 @@ function row(cls, place, t, zoneText, copyLine) {
   return r;
 }
 
+// a number read a way that lands outside 1990-2040 (year 6207 as microseconds): only with "unlikely
+// readings" on, and then after the likely ones and greyed. A date is never unlikely for its year.
+const NUMBER = new Set(["unix-s", "unix-ms", "unix-us", "unix-ns", "filetime", "webkit", "cocoa", "excel", "dotnet"]);
+function unlikely(r) {
+  const p = parts(r.utc);
+  return NUMBER.has(r.format) && !(p && p.y >= 1990 && p.y <= 2040);
+}
+
 const picked = new Map();                  // card number -> which reading is shown
 function card(f, i) {
   const c = el("article", "card");
   const h = el("div", "card-h");
   h.append(el("code", "", f.input));
-  const rs = f.readings || [];
+  const all = f.readings || [];
+  const rs = all.filter((x) => !unlikely(x)).concat(all.filter(unlikely));
   const k = Math.min(picked.get(i) || 0, Math.max(rs.length - 1, 0));
   const r = rs[k];
   h.append(el("span", "fmt", r ? (FORMATS[r.format] || r.format) + (rs.length > 1 ? ": " + rs.length + " readings" : "") : ""));
@@ -491,7 +501,8 @@ function card(f, i) {
   if (rs.length > 1) {
     const seg = el("div", "seg");
     rs.forEach((x, j) => {
-      const b = el("button", "", (FORMATS[x.format] || x.format) + " · " + tail(x));
+      const b = el("button", unlikely(x) ? "unlikely" : "", (FORMATS[x.format] || x.format) + " · " + tail(x));
+      if (unlikely(x)) b.title = "Outside 1990 to 2040: shown because unlikely readings are on (More options)";
       b.type = "button";
       b.setAttribute("aria-pressed", j === k ? "true" : "false");
       b.addEventListener("click", () => { picked.set(i, j); render(); });
@@ -618,7 +629,7 @@ for (const [label, value] of TRIES) {
 }
 $("clear").addEventListener("click", () => { $("input").value = ""; $("exampleTag").hidden = true; picked.clear(); update(); $("input").focus(); });
 $("input").addEventListener("input", () => { $("exampleTag").hidden = true; picked.clear(); soon(); });
-$("all").addEventListener("change", () => { store.set("all", $("all").checked ? "1" : "0"); update(); });
+$("all").addEventListener("change", () => { picked.clear(); update(); });     // not remembered: off on every visit
 $("view").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
   view = b.dataset.view; store.set("view", view); drawView(); update();
 }));
@@ -631,7 +642,8 @@ if (!Array.isArray(chips)) {               // first visit, or the old comma-sepa
 }
 fromZone = store.get("from") || "";
 view = ["cards", "text", "json"].includes(store.get("view")) ? store.get("view") : "cards";
-$("all").checked = store.get("all") === "1";
+$("all").checked = false;
+store.set("all", "");                      // an older page remembered it on, which put year 6207 first
 drawView();
 drawChips();
 loadPlaces().then(() => {
