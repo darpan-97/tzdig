@@ -2,48 +2,55 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="Paste a timestamp or a log line and see that moment in all 418 time zones on the planet, grouped by UTC offset. Runs on the phone; nothing leaves it.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
 <style>
+  /* the web page's look: a day's sky -- night, early or late (amber), working hours (sky blue) --
+     and the sky for the accent; amber is kept for notes. System fonts only: nothing is fetched. */
   :root {
-    --ground: #eef2f0; --surface: #ffffff; --ink: #14201d; --muted: #5a6a66; --line: #d3ddd9;
-    --accent: #0a7c74; --accent-ink: #ffffff; --accent-soft: #d9efec;
-    --night: #2f3f55; --day: #f3e3b3; --work: #e3b55c; --warn: #9a4d12;
+    --ground: #f2f5f8; --surface: #ffffff; --ink: #132132; --muted: #58697b; --line: #d5dde7;
+    --accent: #0a6d97; --accent-ink: #ffffff; --accent-soft: #e0f0f7;
+    --night: #2d3f63; --day: #efae57; --work: #9ccdec; --warn: #8a5300; --tick: #132132;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --ground: #0d1312; --surface: #141c1a; --ink: #e1ebe8; --muted: #93a6a1; --line: #26332f;
-      --accent: #4cc3b8; --accent-ink: #062320; --accent-soft: #173a36;
-      --night: #1d2a3b; --day: #6b5a33; --work: #b98d3d; --warn: #f0a868;
+      --ground: #0a121e; --surface: #111a28; --ink: #e6edf5; --muted: #91a2b7; --line: #223047;
+      --accent: #6cc4ea; --accent-ink: #061320; --accent-soft: #10273a;
+      --night: #1d2d4c; --day: #d9913f; --work: #3f8fc2; --warn: #f2c77e; --tick: #f4f7fb;
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
-    --ground: #0d1312; --surface: #141c1a; --ink: #e1ebe8; --muted: #93a6a1; --line: #26332f;
-    --accent: #4cc3b8; --accent-ink: #062320; --accent-soft: #173a36;
-    --night: #1d2a3b; --day: #6b5a33; --work: #b98d3d; --warn: #f0a868;
+    --ground: #0a121e; --surface: #111a28; --ink: #e6edf5; --muted: #91a2b7; --line: #223047;
+    --accent: #6cc4ea; --accent-ink: #061320; --accent-soft: #10273a;
+    --night: #1d2d4c; --day: #d9913f; --work: #3f8fc2; --warn: #f2c77e; --tick: #f4f7fb;
     color-scheme: dark;
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }   /* a class that sets display must not un-hide it */
   body {
     margin: 0; background: var(--ground); color: var(--ink);
-    font: 16px/1.45 "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     -webkit-text-size-adjust: 100%;
   }
-  .mono { font-family: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
   main { max-width: 640px; margin: 0 auto; padding-inline: 16px; padding-block: 18px 40px; display: grid; gap: 14px; }
   header { display: grid; gap: 2px; }
-  .mark { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-weight: 600; font-size: 22px; letter-spacing: -0.01em; }
-  .mark span { color: var(--accent); font-weight: 400; }
+  .mark { font: 700 26px/1.1 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; letter-spacing: -0.03em; }
+  .mark .tz { color: var(--accent); }
+  .mark .ev { color: var(--muted); font-weight: 400; font-size: 20px; letter-spacing: -0.01em; }
+  /* the sky over one day, midnight to midnight, with a tick at "now" on this phone */
+  .sky {
+    position: relative; height: 5px;
+    background: linear-gradient(90deg, #0b1a33 0%, #2e3a6e 17%, #f08a4b 26%, #fbd38d 32%, #8fd0f5 42%, #8fd0f5 66%,
+      #fbd38d 72%, #f08a4b 78%, #2e3a6e 86%, #0b1a33 100%);
+  }
+  .sky i { position: absolute; top: -2px; width: 3px; height: 9px; margin-left: -1.5px; background: #ffffff; box-shadow: 0 0 0 1px #0b1a33; border-radius: 1px; }
   .lede { margin: 0; color: var(--muted); font-size: 15px; }
   label.lbl { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
   .tag { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 1px 8px; }
   textarea {
     width: 100%; min-height: 92px; resize: vertical; margin-top: 6px; padding: 12px;
-    font: 15px/1.5 "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    font: 15px/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
     color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
   }
   .row { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
@@ -78,7 +85,7 @@
   .clock { margin-left: auto; font-size: 19px; font-weight: 600; }
   .shift { font-size: 12px; color: var(--warn); }
   .bar { position: relative; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--night) 0 25%, var(--day) 25% 33.33%, var(--work) 33.33% 75%, var(--day) 75% 83.33%, var(--night) 83.33% 100%); }
-  .bar i { position: absolute; top: -3px; width: 3px; height: 14px; margin-left: -1.5px; border-radius: 2px; background: var(--ink); }
+  .bar i { position: absolute; top: -3px; width: 3px; height: 14px; margin-left: -1.5px; border-radius: 2px; background: var(--tick); box-shadow: 0 0 0 1.5px var(--surface); }
   .who { font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
   .places { list-style: none; margin: 0; padding: 0 14px 10px; display: grid; gap: 0; }
   .places li { display: grid; grid-template-columns: 2.4em minmax(0, 1fr) auto; gap: 4px 10px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); }
@@ -91,14 +98,15 @@
   @media (prefers-reduced-motion: reduce) { button:active { transform: none; } }
 </style>
 
+<div class="sky" id="sky" aria-hidden="true"></div>
 <main>
   <header>
-    <div class="mark">tzdig <span>everywhere</span></div>
-    <p class="lede">Paste a timestamp or a whole log line. See that moment in every time zone on the planet.</p>
+    <div class="mark"><span class="tz">tz</span>dig <span class="ev">everywhere</span></div>
+    <p class="lede">Dig one moment out of any timestamp or log, and see it in every time zone on the planet.</p>
   </header>
 
   <section>
-    <label class="lbl" for="paste"><span>Timestamp or log text</span><span id="exampleTag" class="tag">example -- paste your own</span></label>
+    <label class="lbl" for="paste"><span>Timestamp or log text</span><span id="exampleTag" class="tag">example: paste your own</span></label>
     <textarea id="paste" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="1727104445123, 133712345678901234, 2024-09-23T15:14:05Z, 23/Sep/2024:15:26:11 +0000, Sep 23 15:27:40, an email header, a JSON event..."></textarea>
     <div class="row"><button id="clear" type="button">Clear</button><span id="status" class="status"></span></div>
     <label class="opt" id="localOpt" hidden><input id="local" type="checkbox"> <span>Times with no zone are this phone's time (<span id="localName"></span>)</span></label>
@@ -402,7 +410,7 @@ async function update() {
     const s = line.trim();
     if (!s) continue;
     if (s[0] === "{") { try { const o = JSON.parse(s); (o.readings && o.readings.length ? rows : markers).push(o); } catch (e) { /* not a row */ } }
-    else notes.push(s.replace(/^tzdig: /, ""));
+    else notes.push(s.replace(/^tzdig: /, "").replace(/^no timestamp found \(it reads (.*)\)$/, "nothing dug up here. tzdig reads $1."));
   }
   found = rows; pick = 0; reading = 0;
   render();
@@ -434,4 +442,14 @@ $("local").addEventListener("change", () => {
 
 $("paste").value = "1727104445123";
 update();
+
+// "now", on this phone, on the sky band: moved each minute
+function skyNow() {
+  const d = new Date();
+  let tick = $("sky").querySelector("i");
+  if (!tick) { tick = el("i"); $("sky").append(tick); }
+  tick.style.left = ((d.getHours() + d.getMinutes() / 60) / 24 * 100).toFixed(2) + "%";
+}
+skyNow();
+setInterval(skyNow, 60000);
 </script>
