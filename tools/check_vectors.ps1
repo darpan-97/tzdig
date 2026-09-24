@@ -39,16 +39,17 @@ $patterns = @{
     'x509'       = @('yyMMddHHmmssK')
     'compact'    = @('yyyyMMddHHmmss', 'yyyyMMdd_HHmmss', 'yyyyMMdd-HHmmss')
     'ymd'        = @('yyyy/M/d H:mm:ss', 'yyyy.MM.dd HH:mm:ss')
-    'mdy'        = @('M/d/yyyy h:mm:ss tt', 'M/d/yyyy H:mm:ss', 'M/d/yy h:mm:ss tt', 'M/d/yyyy, h:mm:ss tt', 'M/d/yy,H:mm:ss', 'M/d/yyyy h:mm tt',
+    'mdy'        = @('M/d/yyyy h:mm:ss tt', 'M/d/yyyy H:mm:ss', 'H:mm M/d/yyyy','M/d/yy h:mm:ss tt', 'M/d/yyyy, h:mm:ss tt', 'M/d/yy,H:mm:ss', 'M/d/yyyy h:mm tt',
                      'M/d/yyyy H:mm', 'M-d-yyyy H:mm:ss')
-    'dmy'        = @('d/M/yyyy H:mm:ss', 'd.M.yyyy H:mm:ss', 'd-M-yyyy H:mm', 'd/M/yyyy hh:mm tt', 'd/M/yyyy H:mm',
+    'dmy'        = @('d/M/yyyy H:mm:ss', 'd.M.yyyy H:mm:ss', 'H:mm d/M/yyyy', 'H:mm:ss d.M.yyyy','d-M-yyyy H:mm', 'd/M/yyyy hh:mm tt', 'd/M/yyyy H:mm',
                      'd-M-yyyy H:mm:ss')
     'clf'        = @('dd/MMM/yyyy:HH:mm:ss zzz')
     'rfc2822'    = @("ddd, dd MMM yyyy HH:mm:ss zzz '(EDT)'", "dd MMM yyyy HH:mm:ss 'GMT'", 'ddd, dd MMM yyyy HH:mm:ss zzz')
     'month-name' = @('dd MMM yyyy HH:mm:ss', 'MMM d, yyyy h:mm:ss tt', "MMMM d, yyyy 'at' h:mm:ss tt",
                      "MMM d, yyyy '@' HH:mm:ss", "MMM'.' d, yyyy HH:mm:ss", 'dd-MMM-yyyy HH:mm:ss', 'dd-MMM-yy hh.mm.ss tt',
                      'dddd, MMMM d, yyyy h:mm:ss tt', 'dddd, d MMMM yyyy h:mm:ss tt', 'MMM d yyyy HH:mm:ss', 'ddMMMyyyy HH:mm:ss',
-                     'MMM d yyyy h:mmtt', 'yyyy-MMM-dd HH:mm:ss', 'd MMMM yyyy h:mm tt', "ddd MMM dd yyyy HH:mm:ss 'GMT'zzz '(Eastern Daylight Time)'")
+                     'MMM d yyyy h:mmtt', 'yyyy-MMM-dd HH:mm:ss', 'd MMMM yyyy h:mm tt', 'd MMMM yyyy H:mm',
+                     'h:mm tt dddd d MMMM yyyy', 'h:mm tt, dddd, MMMM d, yyyy',"ddd MMM dd yyyy HH:mm:ss 'GMT'zzz '(Eastern Daylight Time)'")
     'ctime'      = @('ddd MMM d HH:mm:ss yyyy', "ddd MMM d HH:mm:ss 'UTC' yyyy", "MMM d HH:mm:ss yyyy 'GMT'",
                      'ddd MMM d HH:mm:ss yyyy zzz')
     'syslog'     = @('MMM d HH:mm:ss')
@@ -62,6 +63,7 @@ $abbr = '(?<![(\w])(EDT|EST|CDT|CST|MDT|MST|PDT|PST|IST|AST|SGT|AEST|AEDT|BST|MS
 # a date written as text, read the .NET way; $null when no pattern of that reading fits
 function Read-Text([string]$reading, [string]$text) {
     $frac = ''
+    $text = $text -replace '\b(\d{1,2})(st|nd|rd|th)( of)?\b', '$1'     # 5th of September: 5 September
     $m = [regex]::Match($text, '(?<=\d?\d[:.\-]\d\d[:.\-]\d\d|\d{14}|T\d{6})[.,](\d+)')
     if ($m.Success) { $frac = $m.Groups[1].Value; $text = $text.Remove($m.Index, $m.Length) }
     if ($reading -eq 'iso8601' -and $text -match '^(\d{4})-W(\d\d)-(\d)T(\d\d):(\d\d):(\d\d)Z$') {

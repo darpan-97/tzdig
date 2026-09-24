@@ -34,9 +34,11 @@ import zones
 #   @272 every abbreviation the zone table uses (abbr_list)   @276 how many
 #   @280 --from: the zone name (its number) that times written without a zone are in, -1 for UTC
 #   @284 1 when the date read is a time --from's clocks skip, so it has no reading
+#   @288 1 while the date after a time is read (date_after_time)   @292 the weekday written with the
+#   date, 0 Monday .. 6 Sunday, or -1
 
 pub fn tzdig_new(w):
-    let cx = alloc(288)
+    let cx = alloc(296)
     store(cx, w)
     store(cx + 4, 0)
     store(cx + 8, alloc(4 * 600))
@@ -477,6 +479,8 @@ fn date_clear(cx):
     store(cx + 200, 0)
     store(cx + 204, 0)
     store(cx + 284, 0)
+    store(cx + 288, 0)
+    store(cx + 292, 0 - 1)
     return 0
 
 fn word_len(s, p, e):                         # how many letters at p
@@ -541,16 +545,31 @@ fn day_full(k):
     if k == 5: return "saturday"
     return "sunday"
 
-# the end of a weekday's name at p -- Mon, Monday, MON -- or p when there is none
-fn weekday_end(s, p, e):
+fn day_title(k):                              # 0 Monday .. 6 Sunday, for people
+    if k == 0: return "Monday"
+    if k == 1: return "Tuesday"
+    if k == 2: return "Wednesday"
+    if k == 3: return "Thursday"
+    if k == 4: return "Friday"
+    if k == 5: return "Saturday"
+    return "Sunday"
+
+# the weekday named at p -- Mon, Monday, MON -- as 0 Monday .. 6 Sunday, or -1
+fn weekday_index(s, p, e):
     let n = word_len(s, p, e)
     let k = 0
     while k < 7:
         let full = day_full(k)
         if (n == 3 and same_n(s + p, full, 3) == 1) or same(s + p, n, full) == 1:
-            return p + n
+            return k
         k = k + 1
-    return p
+    return 0 - 1
+
+# the end of a weekday's name at p, or p when there is none
+fn weekday_end(s, p, e):
+    if weekday_index(s, p, e) < 0:
+        return p
+    return p + word_len(s, p, e)
 
 fn skip_spaces(s, p, e):
     let q = p
@@ -677,6 +696,8 @@ fn scan_time(cx, s, p, e):
 # 23/Sep/2024:15:26:11). Always: spaces, a comma (Sep 23, 2024, 3:14:05 PM), " @ " (Kibana), " at "
 # (macOS), and FortiGate's "date=2024-09-23 time=15:14:05".
 fn date_rest(cx, s, p, e, seps):
+    if load(cx + 288) == 1:                   # the time came first (date_after_time): no time after
+        return date_tail(cx, s, p, e)
     if p >= e:
         return 0 - 1
     let q = p
@@ -1129,6 +1150,15 @@ fn date_day_first(cx, s, p, e):
     let q = load(cx + 228)
     if a < 0 or q >= e:
         return 0 - 1
+    let od = ordinal(s, q, e)
+    if od > q:                                # 5th September 2026, 5th of September 2026
+        let om = skip_spaces(s, od, e)
+        if om + 3 <= e and same_n(s + om, "of ", 3) == 1:
+            om = skip_spaces(s, om + 3, e)
+        let omo = month_word(cx, s, om, e)
+        if om == od or omo == 0:
+            return 0 - 1
+        return date_day_month(cx, s, a, omo, 32, load(cx + 224), e)
     let sep = u8(s + q)
     let m = q
     if sep == 47 or sep == 45:
@@ -1226,6 +1256,44 @@ fn date_month_first(cx, s, p, e):
         return date_rest(cx, s, a + 4, e, 0)
     set_date(cx, 4, 0 - 1, mo, d)
     return date_rest(cx, s, q, e, 0)
+
+# a time and then a date: 1:23 PM Monday 5th September 2026, 1:23 PM, Monday, September 7, 2026,
+# 3:14 PM EDT on Sep 23, 2024, 13:23 07/09/2026. Between them a zone, a comma, "on" and a weekday, or
+# none of those. A sign right after the time is a range (10:00-11:00), not an offset. The end, or -1.
+fn date_after_time(cx, s, p, e):
+    let q = scan_time(cx, s, p, e)
+    if q < 0 or (q < e and (u8(s + q) == 43 or u8(s + q) == 45)):
+        return 0 - 1
+    q = scan_zone(cx, s, q, e)
+    let a = q
+    if a < e and u8(s + a) == 44:
+        a = a + 1
+    a = skip_spaces(s, a, e)
+    if a == q:
+        return 0 - 1
+    if a + 3 <= e and same_n(s + a, "on ", 3) == 1:
+        a = skip_spaces(s, a + 3, e)
+    let wk = weekday_index(s, a, e)
+    if wk >= 0:
+        store(cx + 292, wk)
+        a = a + word_len(s, a, e)
+        if a < e and (u8(s + a) == 44 or u8(s + a) == 46):
+            a = a + 1
+        if a >= e or u8(s + a) != 32:
+            return 0 - 1
+        a = skip_spaces(s, a, e)
+    if a >= e:
+        return 0 - 1
+    store(cx + 288, 1)                        # the date's own layouts, with no time after them
+    let r = 0 - 1
+    if isdig(u8(s + a)) == 1:
+        r = date_digits(cx, s, a, e)
+    elif isalpha(u8(s + a)) == 1:
+        r = date_month_first(cx, s, a, e)
+    store(cx + 288, 0)
+    if r >= 0 and load(cx + 140) == 2:
+        store(cx + 140, 6)                    # a day, a month's name and a year after a time: not an email date
+    return r
 
 # the end q of a date with no year that has to show a fraction of a second to be one, or -1: klog and
 # logcat always write one, and without it "slots 10-12 15:00" would be the 12th of October
@@ -1372,6 +1440,7 @@ fn scan_date(cx, s, p, e):
     let q = p
     let w = weekday_end(s, q, e)
     if w > q:
+        store(cx + 292, weekday_index(s, q, e))
         q = w
         if q < e and (u8(s + q) == 44 or u8(s + q) == 46):
             q = q + 1
@@ -1382,7 +1451,9 @@ fn scan_date(cx, s, p, e):
             return 0 - 1
     let c = u8(s + q)
     let r = 0 - 1
-    if isdig(c) == 1:
+    if isdig(c) == 1 and ((q + 1 < e and u8(s + q + 1) == 58) or (q + 2 < e and isdig(u8(s + q + 1)) == 1 and u8(s + q + 2) == 58)):
+        r = date_after_time(cx, s, q, e)      # 1:23 PM Monday 5th September 2026
+    elif isdig(c) == 1:
         r = date_digits(cx, s, q, e)
     elif q == p and (c == 73 or c == 87 or c == 69 or c == 70) and digits(s, q + 1, e, 4) >= 0 and q + 5 < e and u8(s + q + 5) == 32:
         set_date(cx, 13, 0 - 1, digits(s, q + 1, e, 2), digits(s, q + 3, e, 2))
@@ -1998,6 +2069,23 @@ fn reading_id_of(cx, kind, r):                # a reading's name in JSON and in 
         return family_id(date_family(cx, r))
     return reading_id(r)
 
+# the weekday of reading r's date (0 Monday .. 6 Sunday) when a weekday written with it is not that
+# -- Monday 5 September 2026 is a Saturday, usually a slip in the day or the year -- or -1. After
+# applies(), which says which year the reading took.
+fn weekday_off(cx, r):
+    let wk = load(cx + 292)
+    if wk < 0:
+        return 0 - 1
+    let mo = load(cx + 148)
+    let d = load(cx + 152)
+    if r >= 8:
+        mo = load(cx + 152)
+        d = load(cx + 148)
+    let real = clock_fmod(clock_weekday(days_from_civil(load(cx + 172), mo, d)) + 6, 7)
+    if real == wk:
+        return 0 - 1
+    return real
+
 # a reading's name for people, with what was assumed to read it. After applies(), which says which
 # year and which offset the reading took.
 fn put_reading_name(cx, kind, r):
@@ -2005,6 +2093,12 @@ fn put_reading_name(cx, kind, r):
         put(cx, reading_name(r))
         return 0
     put(cx, family_name(date_family(cx, r)))
+    let wr = weekday_off(cx, r)
+    if wr >= 0:
+        put(cx, ", but that date is a ")
+        put(cx, day_title(wr))
+        put(cx, ", not a ")
+        put(cx, day_title(load(cx + 292)))
     if load(cx + 184) == 2:
         put(cx, ", ")
         put_n(cx, load(cx + 192), load(cx + 196))
@@ -2033,6 +2127,12 @@ fn show_reading_json(cx, kind, r):
     put_time(cx, sec, frac, fd, 84, 1)
     putc(cx, 34)
     if kind == 4:
+        if weekday_off(cx, r) >= 0:
+            put(cx, ",\"weekday_written\":\"")
+            put(cx, day_title(load(cx + 292)))
+            put(cx, "\",\"weekday\":\"")
+            put(cx, day_title(weekday_off(cx, r)))
+            putc(cx, 34)
         if load(cx + 184) == 0:
             put(cx, ",\"zone_given\":false")
         if load(cx + 184) == 0 and load(cx + 280) >= 0:

@@ -284,6 +284,7 @@ function render() {
   $("utc").textContent = u ? u.hms + u.frac : r.utc;
   $("utcDate").textContent = u ? dayWord(u) : "";
   let what = (FORMATS[r.format] || r.format) + ", from " + f.input;
+  if (r.weekday_written) what += " -- written as a " + r.weekday_written + ", but that date is a " + r.weekday;
   if (r.input_zone) what += " -- " + r.input_zone + " is read as " + offLabel(r.input_offset);
   if (r.year_given === false) what += " -- no year was given, so it is read as " + r.year + ", the latest that is not in the future";
   if (r.zone_given === false) what += r.read_in

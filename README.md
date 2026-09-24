@@ -54,7 +54,8 @@ Dates with a time of day:
 | Web server log | `[23/Sep/2024:15:26:11 +0000]` |
 | Syslog | `Sep 23 15:27:40` |
 | Unix `date` | `Mon Sep 23 15:14:05 UTC 2024` |
-| Month name | `Sep 23, 2024 3:14:05 PM`, `23-Sep-2024 15:14:05` |
+| Month name | `Sep 23, 2024 3:14:05 PM`, `23-Sep-2024 15:14:05`, `5th of September 2026 13:23` |
+| Time first | `1:23 PM Monday 7th September 2026`, `3:14 PM EDT on Sep 23, 2024`, `13:23 07/09/2026` |
 | Numeric | `2024/09/23 15:25:03`, `9/23/2024 3:14:05 PM`, `23.09.2024 15:14:05` |
 | LDAP, certificate | `20240923151405.0Z`, `240923151405Z` |
 
@@ -69,7 +70,8 @@ A time with no zone is read as UTC, unless `--from` names the zone it is in (on 
 "Times with no zone are in" box; on the phone page, a switch for the phone's own zone). A time the
 clocks show twice as they fall back gets both readings, and one they skip is said not to exist. A
 date with no year is read as the latest year that is not in the future. The output says each time
-which of these it assumed. Not read: a date without a time, a time without a date, relative times
+which of these it assumed. A weekday written with a date is checked against it: `Monday 5 September
+2026` is read, and the output says that date is a Saturday. Not read: a date without a time, a time without a date, relative times
 ("5 minutes ago") and month names in other languages.
 
 ## Zones

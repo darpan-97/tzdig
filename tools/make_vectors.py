@@ -216,6 +216,16 @@ TEXT = [
     ("Mon Sep 23 15:14:05.123456 2024", "ctime", "%a %b %d %H:%M:%S %Y", "123456", 0),  # Apache's error log
 ]
 
+# (input, reading, the input as strptime reads it -- "7th" and "5th of" written plainly by hand -- and
+#  its format): a time written before its date, and a day written as an ordinal
+TEXT_ORDINAL = [
+    ("1:23 PM Monday 7th September 2026", "month-name", "1:23 PM Monday 7 September 2026", "%I:%M %p %A %d %B %Y"),
+    ("1:23 PM, Monday, September 7, 2026", "month-name", "1:23 PM, Monday, September 7, 2026", "%I:%M %p, %A, %B %d, %Y"),
+    ("13:23:05 23.09.2024", "dmy", "13:23:05 23.09.2024", "%H:%M:%S %d.%m.%Y"),
+    ("5th of September 2026 13:23", "month-name", "5 September 2026 13:23", "%d %B %Y %H:%M"),
+    ("5th September 2026 1:23 PM", "month-name", "5 September 2026 1:23 PM", "%d %B %Y %I:%M %p"),
+]
+
 # (now, [(input, reading, strptime format without a year, fraction digits)]): dates written without a year
 YEARLESS = [
     ("2024-10-01T00:00:00Z", [
@@ -250,6 +260,7 @@ ABBR = [
     ("2024-01-15 12:00:00 BST", "iso8601", "%Y-%m-%d %H:%M:%S BST", "BST"),             # out of season
     ("1985-07-01 12:00:00 MSD", "iso8601", "%Y-%m-%d %H:%M:%S MSD", "MSD"),             # Moscow's old summer
     ("2012-07-01 12:00:00 MSK", "iso8601", "%Y-%m-%d %H:%M:%S MSK", "MSK"),             # +3, and +4 in 2011-14
+    ("3:14 PM EDT on Sep 23, 2024", "month-name", "%I:%M %p EDT on %b %d, %Y", "EDT"),  # the time first
 ]
 
 # (input, [(reading, strptime format)]): a date that reads more than one way
@@ -257,6 +268,7 @@ BARE_TEXT = [
     ("03/04/2024 10:00", [("mdy", "%m/%d/%Y %H:%M"), ("dmy", "%d/%m/%Y %H:%M")]),
     ("04-03-2024 10:00:00", [("mdy", "%m-%d-%Y %H:%M:%S"), ("dmy", "%d-%m-%Y %H:%M:%S")]),
     ("13/04/2024 10:00", [("dmy", "%d/%m/%Y %H:%M")]),
+    ("13:23 07/09/2026", [("mdy", "%H:%M %m/%d/%Y"), ("dmy", "%H:%M %d/%m/%Y")]),
 ]
 
 def local_in(text, fmt, frac, zone):
@@ -332,6 +344,9 @@ FIND = [
     ("2024-09-23 15:14:05,42,foo,bar", ["2024-09-23 15:14:05"]),
     ("Sep 23 15:27:40 EST-SRV01 sshd[2211]: Accepted", ["Sep 23 15:27:40"]),
     ("2024-09-23T15:14:05Zfoo and 2024-09-23T15:14:05Z.", ["2024-09-23T15:14:05Z"]),
+    ("1:23 PM Monday 5th September 2026", ["1:23 PM Monday 5th September 2026"]),   # a wrong weekday: still read
+    ("meeting 10:00-11:00 24/09/2024", ["11:00 24/09/2024"]),                        # a range, not an offset
+    ("at 10:30 PM we met; 12:30:45 1 2 3 and 10:30:00 10.0.0.1", []),
     ("version 1.2.3 released, build 4.5.6.7 at noon", []),
     ("IP 203.0.113.7 port 51022 bytes=3221225472 id 0x80070005", []),
     ("at 10:30 PM we met; 3/4 of the users agreed; order 20240923 shipped", []),
@@ -390,6 +405,8 @@ def main():
     for text in ["240923151405Z", "990923151405Z", "550923151405Z", "240923204405+0530"]:
         century = "19" if int(text[:2]) >= 50 else "20"
         out.write("format\t%s\tx509\t%s\n" % (text, strp(century + text, "%Y%m%d%H%M%S%z")))
+    for text, reading, plain, fmt in TEXT_ORDINAL:
+        out.write("format\t%s\t%s\t%s\n" % (text, reading, strp(plain, fmt)))
     for text, readings in BARE_TEXT:
         out.write("bare\t%s\t%s\n" % (text, " ".join("%s=%s" % (r, strp(text, f)) for r, f in readings)))
     for text, reading, fmt, abbr in ABBR:
