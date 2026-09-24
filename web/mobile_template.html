@@ -271,8 +271,13 @@ function render() {
     // was read as (IST: Ireland, Israel or India), the day a date's numbers make (4 Mar or 3 Apr)
     const p = parts(r.utc);
     let tail = p ? String(p.y) : "";
-    if (r.input_zone) tail = r.input_zone + " as " + offLabel(r.input_offset);
-    else if (p && (r.format === "mdy" || r.format === "dmy")) tail = p.d + " " + MON[p.mo - 1];
+    const lo = /^([+-])(\d\d):(\d\d)$/.exec(r.read_offset || r.input_offset || "");
+    const lt = Date.parse(r.utc.replace(/\.\d+/, ""));
+    if ((r.format === "mdy" || r.format === "dmy") && !isNaN(lt)) {   // the date as written, in the zone it was read in
+      const d = new Date(lt + (lo ? (lo[1] === "-" ? -1 : 1) * (+lo[2] * 60 + +lo[3]) : 0) * 60000);
+      tail = d.getUTCDate() + " " + MON[d.getUTCMonth()];
+    } else if (r.input_zone) tail = r.input_zone + " as " + offLabel(r.input_offset);
+    else if (r.read_in) tail = offLabel(r.read_offset);           // a time its clocks show twice
     const b = el("button", "", (FORMATS[r.format] || r.format) + (tail ? " · " + tail : ""));
     b.type = "button"; b.setAttribute("aria-pressed", i === reading ? "true" : "false");
     b.addEventListener("click", () => { reading = i; render(); });

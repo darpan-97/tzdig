@@ -7,120 +7,182 @@
 <meta name="description" content="Paste a timestamp or a log line; get UTC and the local time in any zone, with the right daylight-saving rules. Runs in your browser.">
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5d6778; --line: #d9dee6;
-    --accent: #1f6feb; --accent-ink: #ffffff; --code-bg: #f1f3f6; --warn: #9a3412;
+    --bg: #f5f6f8; --panel: #ffffff; --ink: #1b2230; --muted: #5b6577; --line: #d8dde5;
+    --accent: #1f6feb; --accent-ink: #ffffff; --accent-soft: #e8f0fe; --code-bg: #f0f2f5;
+    --note: #7a4a00; --note-bg: #fff5dc; --note-line: #efd8a6;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #0f1318; --panel: #161b22; --ink: #e6ebf1; --muted: #9aa4b2; --line: #2b3440;
-      --accent: #4c8dff; --accent-ink: #0b1220; --code-bg: #11161d; --warn: #fdba74;
+      --bg: #0e1217; --panel: #161b22; --ink: #e6ebf1; --muted: #98a2b0; --line: #2a333f;
+      --accent: #4c8dff; --accent-ink: #0b1220; --accent-soft: #172338; --code-bg: #11161d;
+      --note: #f0c479; --note-bg: #272010; --note-line: #4a3b1d;
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
-    --bg: #0f1318; --panel: #161b22; --ink: #e6ebf1; --muted: #9aa4b2; --line: #2b3440;
-    --accent: #4c8dff; --accent-ink: #0b1220; --code-bg: #11161d; --warn: #fdba74;
+    --bg: #0e1217; --panel: #161b22; --ink: #e6ebf1; --muted: #98a2b0; --line: #2a333f;
+    --accent: #4c8dff; --accent-ink: #0b1220; --accent-soft: #172338; --code-bg: #11161d;
+    --note: #f0c479; --note-bg: #272010; --note-line: #4a3b1d;
     color-scheme: dark;
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--ink);
-    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
-  main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 40px; display: grid; gap: 16px; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 22px 16px 40px; display: grid; gap: 18px; }
+  .mono, code, textarea, .t { font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
   header h1 { margin: 0; font-size: 26px; letter-spacing: -0.01em; }
-  header p { margin: 4px 0 0; color: var(--muted); max-width: 70ch; }
-  .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; }
-  .field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); flex: 1 1 280px; }
-  .picker { position: relative; flex: 1 1 240px; }
-  .field.from { flex: 0 1 230px; }
+  header p { margin: 2px 0 0; color: var(--muted); }
+  header a { color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+  button {
+    font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 7px; padding: 4px 10px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .lbl { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  .tag { font-size: 12px; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 0 8px; }
+
+  /* the one place to paste */
+  .paste { display: grid; gap: 8px; }
+  textarea {
+    width: 100%; min-height: 96px; max-height: 50vh; resize: vertical; padding: 12px 14px;
+    font-size: 15px; line-height: 1.5; color: var(--ink); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px;
+  }
+  textarea:focus { border-color: var(--accent); }
+  .tries { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+  .tries button { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+  .tries .spacer { flex: 1; }
+
+  /* where to show it */
+  .places { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; font-size: 14px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  }
+  .chip.fixed { padding-right: 10px; color: var(--muted); }
+  .chip button { border: 0; background: transparent; padding: 0 6px; font-size: 15px; line-height: 1; color: var(--muted); border-radius: 999px; }
+  .chip button:hover { color: var(--ink); background: var(--code-bg); }
+  .picker { position: relative; flex: 1 1 200px; max-width: 320px; }
+  .picker input {
+    width: 100%; font: inherit; font-size: 14px; padding: 5px 12px; color: var(--ink);
+    background: var(--panel); border: 1px dashed var(--line); border-radius: 999px;
+  }
+  .picker input:focus { border-style: solid; border-color: var(--accent); }
   #found {
-    position: absolute; z-index: 10; top: 100%; left: 0; right: 0; margin: 4px 0 0; padding: 4px;
+    position: absolute; z-index: 10; top: 100%; left: 0; width: min(460px, 90vw); margin: 4px 0 0; padding: 4px;
     list-style: none; max-height: min(360px, 60vh); overflow: auto;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
   }
   #found li {
-    /* the name keeps its words and at most about half the row; the description wraps in the rest */
     display: grid; grid-template-columns: 2.4em fit-content(55%) minmax(0, 1fr); gap: 10px; align-items: baseline;
-    padding: 5px 8px; border-radius: 5px; cursor: pointer; font-size: 14px; color: var(--ink);
+    padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 14px;
   }
   #found li[aria-selected="true"] { background: var(--code-bg); box-shadow: inset 0 0 0 1px var(--accent); }
-  #found .code { font: 12.5px ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--muted); }
+  #found .code { font: 12.5px ui-monospace, Consolas, monospace; color: var(--muted); }
   #found .what { overflow-wrap: break-word; }
   #found .country .what { font-weight: 600; }
   #found .more { color: var(--muted); font-size: 12.5px; text-align: right; }
   #found li.hint { display: block; cursor: default; color: var(--muted); font-size: 13px; }
-  input[type="text"] {
-    font: 14px ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--ink);
-    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+
+  /* the one question, asked only when it matters */
+  .ask {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px;
+    background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 10px; color: var(--note); font-size: 14px;
   }
-  .toggles { display: flex; gap: 16px; font-size: 14px; }
-  .toggles label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
-  .panes { display: grid; gap: 16px; grid-template-columns: 1fr; }
-  @media (min-width: 980px) { .panes { grid-template-columns: 1fr 1fr; } }
-  .pane { display: grid; gap: 6px; grid-template-rows: auto 1fr; min-width: 0; }
-  .pane-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--muted); }
-  textarea, pre {
-    margin: 0; min-height: 320px; width: 100%; padding: 12px; border-radius: 8px;
-    font: 13.5px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace;
-    border: 1px solid var(--line); color: var(--ink);
+  .ask b { font-weight: 600; margin-right: 4px; }
+
+  /* results */
+  .results { display: grid; gap: 12px; }
+  .msg { color: var(--muted); padding: 8px 2px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: grid; gap: 10px; min-width: 0; }
+  .card-h { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }
+  .card-h code { font-size: 14px; background: var(--code-bg); padding: 1px 6px; border-radius: 5px; overflow-wrap: anywhere; }
+  .card-h .fmt { font-weight: 600; }
+  .card-h .line { color: var(--muted); font-size: 13px; margin-left: auto; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+  .notes li { font-size: 13.5px; color: var(--note); background: var(--note-bg); border-radius: 6px; padding: 3px 8px; justify-self: start; }
+  .rows { display: grid; gap: 2px; }
+  /* place | time | date | zone | copy */
+  .row { display: grid; grid-template-columns: minmax(110px, 180px) max-content max-content minmax(0, 1fr) auto; gap: 4px 16px; align-items: baseline; padding: 6px 4px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .row .place { font-size: 14px; }
+  .row .t { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .row .d { color: var(--muted); font-size: 14px; }
+  .row .z { color: var(--muted); font-size: 13px; }
+  .row .copy { justify-self: end; }
+  .row.utc .t { color: var(--accent); }
+  @media (max-width: 620px) {                /* place on its own line; time, date, copy; then the zone */
+    .row { grid-template-columns: max-content minmax(0, 1fr) auto; gap: 2px 12px; }
+    .row .place { grid-column: 1 / -1; font-weight: 600; }
+    .row .z { grid-column: 1 / 3; grid-row: 3; }
+    .row .copy { grid-column: 3; grid-row: 2; }
   }
-  textarea { background: var(--panel); resize: vertical; }
-  pre { background: var(--code-bg); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-  pre.error { color: var(--warn); }
-  button {
-    font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
-    border-radius: 6px; padding: 3px 10px; cursor: pointer;
-  }
-  button:hover { border-color: var(--accent); }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  pre.raw { margin: 0; padding: 12px; background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; }
+
+  details.more { color: var(--muted); font-size: 14px; }
+  details.more summary { cursor: pointer; width: max-content; }
+  details.more .opts { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; margin-top: 10px; }
+  details.more label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
   footer { color: var(--muted); font-size: 13px; }
-  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.95em; }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: no-preference) { .card { animation: in 0.14s ease-out; } @keyframes in { from { opacity: 0.4; } } }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>tzdig</h1>
-    <p>Paste a timestamp, or a whole log line or JSON event. Every timestamp in it is shown in UTC and in
-    the zones you name, with the daylight-saving rules for that date.</p>
+    <div>
+      <h1>tzdig</h1>
+      <p>Paste a timestamp or a whole log. See it in UTC and in the places you choose.</p>
+    </div>
+    <a href="https://github.com/darpan-97/tzdig">tzdig on GitHub</a>
   </header>
 
-  <div class="controls">
-    <label class="field">Also show these zones: a country code, a code and a city, an IANA name, or an abbreviation
-      <input id="zones" type="text" spellcheck="false" autocomplete="off" placeholder="est, AU Sydney, in, Europe/Paris">
-    </label>
-    <label class="field from">Times with no zone are in
-      <input id="from" type="text" spellcheck="false" autocomplete="off" placeholder="UTC, or a zone: in, sydney">
-    </label>
-    <div class="field picker">
-      <label for="find">Add a country or one of its zones</label>
-      <input id="find" type="text" spellcheck="false" autocomplete="off" placeholder="australia, sydney, NZ, kolkata"
-        role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="found">
-      <ul id="found" role="listbox" aria-label="Countries and zones" hidden></ul>
-    </div>
-    <div class="toggles">
-      <label><input id="json" type="checkbox"> JSON</label>
-      <label><input id="all" type="checkbox"> every reading</label>
-    </div>
-  </div>
+  <section class="paste">
+    <label class="lbl" for="input">Timestamp or log <span id="exampleTag" class="tag" hidden>example: paste your own</span></label>
+    <textarea id="input" spellcheck="false" autocomplete="off" placeholder="1727104445123, 2024-09-23 11:14:05 -0400, Sep 23 15:27:40, an email header, a JSON event..."></textarea>
+    <div class="tries" id="tries"><span>Try:</span><span class="spacer"></span><button id="clear" type="button">Clear</button></div>
+  </section>
 
-  <div class="panes">
-    <div class="pane">
-      <div class="pane-head"><span>Input</span><button id="example" type="button">Try an example</button></div>
-      <textarea id="input" spellcheck="false" placeholder="1727104445123&#10;133712345678901234&#10;{&quot;ts&quot;:1727104445123,&quot;logon&quot;:&quot;2024-09-23T20:44:05.123+05:30&quot;}"></textarea>
+  <section class="places" aria-label="Places to show">
+    <span class="lbl">Show in</span>
+    <span class="chip fixed" title="UTC is always shown">UTC</span>
+    <span id="chips" class="places"></span>
+    <div class="picker">
+      <input id="find" type="text" spellcheck="false" autocomplete="off" placeholder="+ Add a place: sydney, india, us..."
+        role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="found" aria-label="Add a place">
+      <ul id="found" role="listbox" aria-label="Countries and places" hidden></ul>
     </div>
-    <div class="pane">
-      <div class="pane-head"><span>Result</span><span id="status"></span></div>
-      <pre id="output" aria-live="polite"></pre>
+  </section>
+
+  <section id="ask" class="ask" hidden aria-live="polite">
+    <b>Some times have no zone written. Read them as:</b>
+    <span id="askOpts" class="seg"></span>
+  </section>
+
+  <section id="results" class="results" aria-live="polite"></section>
+
+  <details class="more">
+    <summary>More options</summary>
+    <div class="opts">
+      <label><input id="all" type="checkbox"> Every reading of a number, not only those in 1990 to 2040</label>
+      <span class="seg" id="view" role="group" aria-label="Show results as">
+        <button type="button" data-view="cards">Cards</button>
+        <button type="button" data-view="text">Text</button>
+        <button type="button" data-view="json">JSON</button>
+      </span>
     </div>
-  </div>
+  </details>
 
   <footer>
-    Runs entirely in this page: nothing you paste is sent anywhere. Time zone rules: IANA {{IANA}}, 1970&ndash;2069.
-    A bare number can mean several things, so every reading between 1990 and 2040 is shown.
+    Runs entirely in this page: nothing you paste is sent anywhere. Time zone rules: the IANA database {{IANA}}, 1970&ndash;2069.
+    A value that can be read more than one way is shown every way.
   </footer>
 </main>
 
@@ -129,7 +191,6 @@
 // tzdig.wasm, built from src/tzdig_web.nitro by build.sh, base64 so this one file works from disk too
 const WASM = "{{WASM_BASE64}}";
 let compiled = null;
-
 function wasmModule() {
   if (!compiled) {
     const bin = atob(WASM);
@@ -142,7 +203,7 @@ function wasmModule() {
 
 // One run of the program: text in on its standard input, what it writes out. A fresh instance
 // each time, so no run sees another's memory.
-async function runWhen(text) {
+async function runTzdig(text) {
   const mod = await wasmModule();
   const input = new TextEncoder().encode(text);
   const decoder = new TextDecoder();
@@ -161,7 +222,6 @@ async function runWhen(text) {
     },
     write: (fd, ptr, len) => {
       if (fd !== 1 && fd !== 2) return -1;
-      // stream: a character split across two writes ("Côte" at a buffer's end) is kept whole
       out.push(decoder.decode(new Uint8Array(memory.buffer, ptr, len).slice(), { stream: true }));
       return len;
     },
@@ -182,83 +242,65 @@ const store = {
   get(k) { try { return localStorage.getItem("tzdig." + k); } catch (e) { return null; } },
   set(k, v) { try { localStorage.setItem("tzdig." + k, v); } catch (e) { /* private mode: fine */ } },
 };
-
-// the options travel on a first "#tzdig" line, exactly as they would on a command line
-function optionsLine() {
-  let line = "#tzdig";
-  const zones = $("zones").value.split(",").map((z) => z.trim().replace(/\s+/g, "_")).filter(Boolean);
-  if (zones.length) line += " --in " + zones.join(",");
-  const from = $("from").value.trim().replace(/\s+/g, "_");
-  if (from) line += " --from " + from;
-  if ($("json").checked) line += " --json";
-  if ($("all").checked) line += " --all";
-  return line;
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
 }
 
-let generation = 0;
-async function update() {
-  const text = $("input").value;
-  const mine = ++generation;
-  if (!text.trim()) {
-    $("output").textContent = "";
-    $("output").className = "";
-    $("status").textContent = "";
-    return;
-  }
-  const started = performance.now();
-  try {
-    const result = await runWhen(optionsLine() + "\n" + text);
-    if (mine !== generation) return;
-    $("output").textContent = result;
-    $("output").className = "";
-    $("status").textContent = Math.round(performance.now() - started) + " ms";
-  } catch (e) {
-    if (mine !== generation) return;
-    $("output").textContent = "tzdig stopped: " + (e && e.message ? e.message : String(e));
-    $("output").className = "error";
-    $("status").textContent = "";
-  }
-}
+const FORMATS = {
+  "unix-s": "Unix seconds", "unix-ms": "Unix milliseconds", "unix-us": "Unix microseconds", "unix-ns": "Unix nanoseconds",
+  "filetime": "Windows FILETIME", "webkit": "Chrome / WebKit time", "cocoa": "Apple time", "excel": "Excel date",
+  "dotnet": ".NET ticks", "iso8601": "ISO 8601", "rfc2822": "Email date", "clf": "Web server log", "syslog": "Syslog",
+  "ctime": "Unix date", "month-name": "Date with a month name", "ymd": "Year/month/day", "mdy": "Month/day/year",
+  "dmy": "Day/month/year", "ldap": "LDAP time", "x509": "Certificate time", "compact": "Compact date",
+  "klog": "Kubernetes log", "logcat": "Android logcat",
+};
+// what phones and browsers report for a zone the IANA table spells differently today
+const ALIASES = {
+  "Asia/Calcutta": "Asia/Kolkata", "Asia/Saigon": "Asia/Ho_Chi_Minh", "Asia/Katmandu": "Asia/Kathmandu",
+  "Asia/Rangoon": "Asia/Yangon", "Europe/Kiev": "Europe/Kyiv", "America/Buenos_Aires": "America/Argentina/Buenos_Aires",
+  "Atlantic/Faeroe": "Atlantic/Faroe", "America/Godthab": "America/Nuuk", "Pacific/Truk": "Pacific/Chuuk",
+  "Pacific/Ponape": "Pacific/Pohnpei", "Asia/Thimbu": "Asia/Thimphu",
+};
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const deviceZone = (() => {
+  try { const z = Intl.DateTimeFormat().resolvedOptions().timeZone; return ALIASES[z] || z; } catch (e) { return null; }
+})();
+const cityOf = (zone) => zone.slice(zone.lastIndexOf("/") + 1).replace(/_/g, " ");
 
-let timer = 0;
-function soon() {
-  clearTimeout(timer);
-  timer = setTimeout(update, 120);
-}
-
-// ---- the picker ----------------------------------------------------------------------------------
-// Every country, by its ISO 3166 alpha-2 code, and each of its zones, as the program itself lists
-// them (--zones --json): the page keeps no zone list of its own. Picking one adds it to the zones.
+// ---- the places: every country and its zones, as the program lists them (--zones --json) --------
 const fold = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();   // "Côte" -> "cote"
 let places = null;
+let zoneIndex = new Map();                 // IANA name -> { code, city, country }
 function loadPlaces() {
   if (!places) {
-    places = runWhen("#tzdig --zones --json\n").then((text) => {
+    places = runTzdig("#tzdig --zones --json\n").then((text) => {
       const list = [];
       for (const c of JSON.parse(text)) {
         const n = c.zones.length;
-        list.push({ country: true, code: c.code, what: c.country, value: c.code,
-                    more: n === 1 ? "1 zone" : n === 2 ? "both zones" : "all " + n + " zones",
-                    hay: c.code + " " + c.country });
+        list.push({ country: true, code: c.code, what: c.country, value: c.code, label: c.code + " " + c.country, zones: n,
+                    zone: n === 1 ? c.zones[0].zone : null,
+                    more: n === 1 ? "1 zone" : "all " + n + " zones", hay: c.code + " " + c.country });
         for (const z of c.zones) {
-          const city = z.zone.slice(z.zone.lastIndexOf("/") + 1).replace(/_/g, " ");
-          list.push({ country: false, code: c.code, what: city, value: c.code + " " + city,
+          const city = cityOf(z.zone);
+          zoneIndex.set(z.zone, { code: c.code, city, country: c.country });
+          list.push({ country: false, code: c.code, what: city, value: c.code + " " + city, label: c.code + " " + city, zones: 1, zone: z.zone,
                       more: z.note || c.country, hay: [c.code, city, z.zone, z.note, c.country].join(" ") });
         }
       }
-      for (const p of list) {
-        p.hay = fold(p.hay);
-        p.words = p.hay.split(/[^a-z0-9]+/).filter(Boolean);
-      }
+      for (const p of list) { p.hay = fold(p.hay); p.words = p.hay.split(/[^a-z0-9]+/).filter(Boolean); }
       return list;
     });
-    places.catch(() => { places = null; });           // tried again on the next key
+    places.catch(() => { places = null; });
   }
   return places;
 }
 
-// every word typed must appear; a country whose code it is comes first, then words that start a
-// word ("syd" in Sydney) before words inside one, countries before zones, and the table's order
+// every word typed must appear; a country whose code it is first, then words that start a word
+// ("syd" in Sydney) before words inside one, countries before zones, and the table's order
 function search(list, query) {
   const q = fold(query);
   const words = q.split(/[^a-z0-9]+/).filter(Boolean);
@@ -268,42 +310,57 @@ function search(list, query) {
     const starts = words.every((w) => p.words.some((h) => h.startsWith(w)));
     return (starts ? 1 : 3) + (p.country ? 0 : 1);
   };
-  return list
-    .filter((p) => words.length && words.every((w) => p.hay.includes(w)))
-    .map((p, i) => ({ p, i, r: rank(p) }))
-    .sort((a, b) => a.r - b.r || a.i - b.i)
-    .map((x) => x.p);
+  return list.filter((p) => words.length && words.every((w) => p.hay.includes(w)))
+    .map((p, i) => ({ p, i, r: rank(p) })).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.p);
+}
+
+// ---- the chosen places, remembered in this browser -----------------------------------------------
+let chips = [];                            // { value: as --in reads it, label, zones: how many (0: unknown), zone: its one IANA zone, or null }
+function saveChips() { store.set("places", JSON.stringify(chips)); }
+function drawChips() {
+  const box = $("chips");
+  box.replaceChildren();
+  chips.forEach((c, i) => {
+    const s = el("span", "chip", c.label);
+    const x = el("button", "", "×");
+    x.type = "button";
+    x.setAttribute("aria-label", "Remove " + c.label);
+    x.addEventListener("click", () => {
+      if (c.zone && fromZone === c.zone) { fromZone = ""; store.set("from", ""); }
+      chips.splice(i, 1); saveChips(); drawChips(); update();
+    });
+    s.append(x);
+    box.append(s);
+  });
+}
+function addChip(p) {
+  if (!chips.some((c) => c.value.toLowerCase() === p.value.toLowerCase())) {
+    chips.push({ value: p.value, label: p.label, zones: p.zones, zone: p.zone });
+    saveChips(); drawChips();
+  }
+  $("find").value = "";
+  find();
+  update();
 }
 
 const SHOWN = 60;
-let shown = [];
-let active = -1;
-
+let shown = [], active = -1;
 function hint(ul, text) {
-  const li = document.createElement("li");
-  li.className = "hint";
+  const li = el("li", "hint", text);
   li.setAttribute("role", "option");
   li.setAttribute("aria-disabled", "true");
-  li.textContent = text;
   ul.append(li);
 }
-
 function show(extra, query) {
   const ul = $("found");
   ul.replaceChildren();
   shown.forEach((p, i) => {
-    const li = document.createElement("li");
+    const li = el("li", p.country ? "country" : "zone");
     li.id = "place-" + i;
     li.dataset.i = i;
-    li.className = p.country ? "country" : "zone";
     li.setAttribute("role", "option");
-    for (const [cls, text] of [["code", p.code], ["what", p.what], ["more", p.more]]) {
-      const span = document.createElement("span");
-      span.className = cls;
-      span.textContent = text;
-      li.append(span);
-    }
-    li.addEventListener("click", () => choose(p));
+    for (const [cls, text] of [["code", p.code], ["what", p.what], ["more", p.more]]) li.append(el("span", cls, text));
+    li.addEventListener("click", () => addChip(p));
     ul.append(li);
   });
   if (query && !shown.length) hint(ul, "Nothing matches “" + query + "”: try a country, its two-letter code, or a city");
@@ -312,84 +369,282 @@ function show(extra, query) {
   $("find").setAttribute("aria-expanded", query ? "true" : "false");
   mark();
 }
-
 function mark() {
-  $("found").querySelectorAll("li[data-i]").forEach((li) =>
-    li.setAttribute("aria-selected", Number(li.dataset.i) === active ? "true" : "false"));
+  $("found").querySelectorAll("li[data-i]").forEach((li) => li.setAttribute("aria-selected", Number(li.dataset.i) === active ? "true" : "false"));
   const cur = active >= 0 ? $("place-" + active) : null;
-  if (cur) {
-    $("find").setAttribute("aria-activedescendant", cur.id);
-    cur.scrollIntoView({ block: "nearest" });
-  } else {
-    $("find").removeAttribute("aria-activedescendant");
-  }
+  if (cur) { $("find").setAttribute("aria-activedescendant", cur.id); cur.scrollIntoView({ block: "nearest" }); }
+  else $("find").removeAttribute("aria-activedescendant");
 }
-
 async function find() {
   const query = $("find").value.trim();
   let list = [];
   if (query) {
     try { list = await loadPlaces(); } catch (e) { return; }
-    if ($("find").value.trim() !== query) return;     // typed on meanwhile
+    if ($("find").value.trim() !== query) return;
   }
   const all = query ? search(list, query) : [];
   shown = all.slice(0, SHOWN);
   active = shown.length ? 0 : -1;
   show(all.length - shown.length, query);
 }
-
-function choose(p) {
-  const zones = $("zones").value.split(",").map((z) => z.trim()).filter(Boolean);
-  if (!zones.some((z) => z.toLowerCase() === p.value.toLowerCase())) zones.push(p.value);
-  $("zones").value = zones.join(", ");
-  store.set("zones", $("zones").value);
-  $("find").value = "";
-  find();
-  update();
-}
-
 $("find").addEventListener("input", find);
-$("find").addEventListener("focus", () => {
-  loadPlaces().catch(() => {});                       // ready before the first key
-  if ($("find").value.trim()) find();
-});
-$("find").addEventListener("blur", () => {
-  $("found").hidden = true;
-  $("find").setAttribute("aria-expanded", "false");
-});
+$("find").addEventListener("focus", () => { loadPlaces().catch(() => {}); if ($("find").value.trim()) find(); });
+$("find").addEventListener("blur", () => { $("found").hidden = true; $("find").setAttribute("aria-expanded", "false"); });
 $("find").addEventListener("keydown", (e) => {
   if ((e.key === "ArrowDown" || e.key === "ArrowUp") && shown.length) {
     e.preventDefault();
     active = (active + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length;
     mark();
   } else if (e.key === "Enter" && active >= 0) {
-    e.preventDefault();
-    choose(shown[active]);
+    e.preventDefault(); addChip(shown[active]);
   } else if (e.key === "Escape") {
-    $("find").value = "";
-    find();
+    $("find").value = ""; find();
   }
 });
-// pressing on the list keeps the focus in the box, so the list is still there when the click lands
 $("found").addEventListener("mousedown", (e) => e.preventDefault());
 
-const EXAMPLE = [
-  '{"timestamp":1727104445123,"process":"powershell.exe","user":"CORP\\\\alice",',
-  ' "logon_time":"2024-09-23T20:44:05.123+05:30","pwdLastSet":133712345678901234}',
-  "Date: Mon, 23 Sep 2024 11:14:05 -0400",
-  "zeek conn 1727104445.123456 10.0.0.15 -> 93.184.216.34",
-].join("\n");
+// ---- reading one timestamp's answer ---------------------------------------------------------------
+function parts(t) {       // "2024-09-24T01:14:05.123" -> time, date, weekday
+  const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(\.\d+)?/.exec(t);
+  if (!m) return null;
+  const y = +m[1], mo = +m[2], d = +m[3];
+  const dt = new Date(0); dt.setUTCFullYear(y, mo - 1, d);
+  return { y, mo, d, time: m[4] + ":" + m[5] + ":" + m[6] + (m[7] || ""), date: WDAY[dt.getUTCDay()] + " " + d + " " + MON[mo - 1] + " " + y };
+}
+function offLabel(o) {    // "+05:30" -> "UTC+5:30", "+00:00" -> "UTC"
+  const m = /^([+-])(\d\d):(\d\d)$/.exec(o || "");
+  if (!m) return o || "";
+  const h = +m[2], mi = m[3];
+  if (!h && mi === "00") return "UTC";
+  return "UTC" + (m[1] === "-" ? "−" : "+") + h + (mi !== "00" ? ":" + mi : "");
+}
+const realAbbr = (a) => (a && !/^[+-]\d/.test(a) ? a : "");
+function placeLabel(z) {
+  const p = zoneIndex.get(z.zone);
+  return (z.country ? z.country + " " : "") + (p ? p.city : cityOf(z.zone));
+}
+// what tells a token's readings apart: a number's year, the offset a zone name or --from took, the
+// day a date's numbers make (4 Mar or 3 Apr)
+function tail(r) {
+  const p = parts(r.utc);
+  if (r.format === "mdy" || r.format === "dmy") {        // the date as written: UTC moved by the zone it was read in
+    const m = /^([+-])(\d\d):(\d\d)$/.exec(r.read_offset || r.input_offset || "");
+    const t = Date.parse(r.utc.replace(/\.\d+/, ""));
+    if (!isNaN(t)) {
+      const d = new Date(t + (m ? (m[1] === "-" ? -1 : 1) * (+m[2] * 60 + +m[3]) : 0) * 60000);
+      return d.getUTCDate() + " " + MON[d.getUTCMonth()];
+    }
+  }
+  if (r.input_zone) return r.input_zone + " as " + offLabel(r.input_offset);
+  if (r.read_in) return offLabel(r.read_offset);
+  return p ? String(p.y) : "";
+}
+function notesOf(r) {
+  const n = [];
+  if (r.weekday_written) n.push("Written as a " + r.weekday_written + ", but that date is a " + r.weekday);
+  if (r.input_zone) n.push(r.input_zone + " is read as " + offLabel(r.input_offset));
+  if (r.year_given === false) n.push("No year written: read as " + r.year + ", the latest that is not in the future");
+  if (r.zone_given === false) n.push(r.read_in ? "No zone written: read as " + cityOf(r.read_in) + " time (" + offLabel(r.read_offset) + ")"
+                                               : "No zone written: read as UTC");
+  return n;
+}
 
-$("zones").value = store.get("zones") ?? "est, aest";
-$("json").checked = store.get("json") === "1";
+async function copyText(text, btn) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {
+    const ta = el("textarea"); ta.value = text; document.body.append(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+    ta.remove();
+  }
+  const was = btn.textContent;
+  btn.textContent = ok ? "Copied" : "Copy failed";
+  setTimeout(() => { btn.textContent = was; }, 1200);
+}
+function row(cls, place, t, zoneText, copyLine) {
+  const r = el("div", "row " + cls);
+  const p = parts(t);
+  r.append(el("span", "place", place), el("span", "t", p ? p.time : t), el("span", "d", p ? p.date : ""), el("span", "z", zoneText));
+  const b = el("button", "copy", "Copy");
+  b.type = "button";
+  b.setAttribute("aria-label", "Copy the time in " + place);
+  b.addEventListener("click", () => copyText(copyLine, b));
+  r.append(b);
+  return r;
+}
+
+const picked = new Map();                  // card number -> which reading is shown
+function card(f, i) {
+  const c = el("article", "card");
+  const h = el("div", "card-h");
+  h.append(el("code", "", f.input));
+  const rs = f.readings || [];
+  const k = Math.min(picked.get(i) || 0, Math.max(rs.length - 1, 0));
+  const r = rs[k];
+  h.append(el("span", "fmt", r ? (FORMATS[r.format] || r.format) + (rs.length > 1 ? ": " + rs.length + " readings" : "") : ""));
+  if (f.line) h.append(el("span", "line", "line " + f.line));
+  c.append(h);
+  if (!r) {                                 // a marker, a skipped time, or a number with no reading here
+    c.append(el("div", "msg", f.note ? f.note[0].toUpperCase() + f.note.slice(1)
+                                     : "No reading of this number lands between 1990 and 2040. More options: every reading."));
+    return c;
+  }
+  if (rs.length > 1) {
+    const seg = el("div", "seg");
+    rs.forEach((x, j) => {
+      const b = el("button", "", (FORMATS[x.format] || x.format) + " · " + tail(x));
+      b.type = "button";
+      b.setAttribute("aria-pressed", j === k ? "true" : "false");
+      b.addEventListener("click", () => { picked.set(i, j); render(); });
+      seg.append(b);
+    });
+    c.append(seg);
+  }
+  const notes = notesOf(r);
+  if (notes.length) {
+    const ul = el("ul", "notes");
+    for (const n of notes) ul.append(el("li", "", n));
+    c.append(ul);
+  }
+  const rows = el("div", "rows");
+  const u = r.utc.replace(/Z$/, "");
+  rows.append(row("utc", "UTC", u, "", u.replace("T", " ") + " UTC"));
+  for (const z of r.zones) {
+    const label = placeLabel(z);
+    if (!z.time) { rows.append(row("", label, "", "no zone rules for this year (1970 to 2069)", label)); continue; }
+    const abbr = realAbbr(z.abbreviation);
+    const zt = (abbr ? abbr + " · " : "") + offLabel(z.offset);
+    rows.append(row("", label, z.time, zt, z.time.replace("T", " ") + " " + (abbr || offLabel(z.offset)) + " (" + label + ")"));
+  }
+  c.append(rows);
+  return c;
+}
+
+// ---- running it ----------------------------------------------------------------------------------
+let fromZone = "";                         // "" for UTC, or a name --from reads
+let view = "cards";
+let found = [], messages = [], raw = "";
+
+function optionsLine() {
+  let line = "#tzdig";
+  if (chips.length) line += " --in " + chips.map((c) => c.value.replace(/\s+/g, "_")).join(",");
+  if (fromZone) line += " --from " + fromZone.replace(/\s+/g, "_");
+  if ($("all").checked) line += " --all";
+  if (view !== "text") line += " --json";
+  return line;
+}
+
+// the one question: what zone a time with no zone written is in -- UTC, this computer's zone, or a
+// single-zone place already chosen. Asked only while such a time is on screen.
+function drawAsk() {
+  const need = view === "cards" && found.some((f) => (f.readings || []).some((r) => r.zone_given === false));
+  $("ask").hidden = !need;
+  if (!need) return;
+  const opts = [{ value: "", label: "UTC" }];
+  if (deviceZone && zoneIndex.has(deviceZone)) {
+    const p = zoneIndex.get(deviceZone);
+    opts.push({ value: deviceZone, label: p.city + " (this computer)" });
+  }
+  for (const c of chips) if (c.zone && !opts.some((o) => o.value === c.zone)) opts.push({ value: c.zone, label: c.label });
+  if (fromZone && !opts.some((o) => o.value === fromZone)) opts.push({ value: fromZone, label: fromZone });
+  const box = $("askOpts");
+  box.replaceChildren();
+  for (const o of opts) {
+    const b = el("button", "", o.label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", o.value === fromZone ? "true" : "false");
+    b.addEventListener("click", () => { fromZone = o.value; store.set("from", fromZone); update(); });
+    box.append(b);
+  }
+}
+
+function render() {
+  const box = $("results");
+  box.replaceChildren();
+  if (view !== "cards") {
+    if (raw.trim()) box.append(el("pre", "raw", raw));
+    drawAsk();
+    return;
+  }
+  found.forEach((f, i) => box.append(card(f, i)));
+  for (const m of messages) box.append(el("div", "msg", m));
+  drawAsk();
+}
+
+let generation = 0;
+async function update() {
+  const text = $("input").value;
+  const mine = ++generation;
+  if (!text.trim()) { found = []; messages = []; raw = ""; render(); return; }
+  try {
+    await loadPlaces().catch(() => {});
+    const out = await runTzdig(optionsLine() + "\n" + text);
+    if (mine !== generation) return;
+    raw = out;
+    found = []; messages = [];
+    if (view === "cards") {
+      for (const line of out.split("\n")) {
+        const s = line.trim();
+        if (!s) continue;
+        if (s[0] === "{") { try { found.push(JSON.parse(s)); continue; } catch (e) { /* not a row */ } }
+        const m = s.replace(/^tzdig: /, "");
+        messages.push(m[0].toUpperCase() + m.slice(1));
+      }
+    }
+  } catch (e) {
+    if (mine !== generation) return;
+    found = []; raw = "";
+    messages = [typeof WebAssembly === "undefined" ? "tzdig could not start: this browser has no WebAssembly."
+                                                   : "tzdig stopped: " + (e && e.message ? e.message : String(e))];
+  }
+  render();
+}
+let timer = 0;
+function soon() { clearTimeout(timer); timer = setTimeout(update, 120); }
+
+// ---- the examples, and starting up --------------------------------------------------------------
+const TRIES = [
+  ["1727104445123", "1727104445123"],
+  ["2024-09-23 11:14:05 -0400", "2024-09-23 11:14:05 -0400"],
+  ["Sep 23 15:27:40", "Sep 23 15:27:40 web01 sshd[2211]: Accepted publickey for deploy"],
+  ["1:23 PM Monday 7th September 2026", "1:23 PM Monday 7th September 2026"],
+  ["133712345678901234", "133712345678901234"],
+  ["a JSON event", '{"event":"login","user":"alice","timestamp":1727104445123,\n "logon_time":"2024-09-23T20:44:05.123+05:30","pwdLastSet":133712345678901234}'],
+];
+for (const [label, value] of TRIES) {
+  const b = el("button", "", label);
+  b.type = "button";
+  b.addEventListener("click", () => { $("input").value = value; $("exampleTag").hidden = true; picked.clear(); update(); $("input").focus(); });
+  $("tries").insertBefore(b, $("tries").querySelector(".spacer"));
+}
+$("clear").addEventListener("click", () => { $("input").value = ""; $("exampleTag").hidden = true; picked.clear(); update(); $("input").focus(); });
+$("input").addEventListener("input", () => { $("exampleTag").hidden = true; picked.clear(); soon(); });
+$("all").addEventListener("change", () => { store.set("all", $("all").checked ? "1" : "0"); update(); });
+$("view").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+  view = b.dataset.view; store.set("view", view); drawView(); update();
+}));
+function drawView() { $("view").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.view === view ? "true" : "false")); }
+
+try { chips = JSON.parse(store.get("places") || "null") || null; } catch (e) { chips = null; }
+if (!Array.isArray(chips)) {               // first visit, or the old comma-separated zones box
+  const old = (store.get("zones") || "").split(",").map((z) => z.trim()).filter(Boolean);
+  chips = old.map((z) => ({ value: z, label: z, zones: 0 }));
+}
+fromZone = store.get("from") || "";
+view = ["cards", "text", "json"].includes(store.get("view")) ? store.get("view") : "cards";
 $("all").checked = store.get("all") === "1";
-$("zones").addEventListener("input", () => { store.set("zones", $("zones").value); soon(); });
-$("from").value = store.get("from") ?? "";
-$("from").addEventListener("input", () => { store.set("from", $("from").value); soon(); });
-$("json").addEventListener("change", () => { store.set("json", $("json").checked ? "1" : "0"); soon(); });
-$("all").addEventListener("change", () => { store.set("all", $("all").checked ? "1" : "0"); soon(); });
-$("input").addEventListener("input", soon);
-$("example").addEventListener("click", () => { $("input").value = EXAMPLE; update(); });
+drawView();
+drawChips();
+loadPlaces().then(() => {
+  if (!store.get("places") && !chips.length && deviceZone && zoneIndex.has(deviceZone)) {   // start with this computer's own zone
+    const p = zoneIndex.get(deviceZone);
+    chips.push({ value: p.code + " " + p.city, label: p.code + " " + p.city, zones: 1, zone: deviceZone });
+    saveChips(); drawChips();
+  }
+  update();
+}).catch(() => update());
+$("input").value = "1727104445123";
+$("exampleTag").hidden = false;
+update();
 </script>
 </body>
 </html>

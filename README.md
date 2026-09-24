@@ -66,8 +66,9 @@ When a value can be read more than one way, every reading is shown:
 - a zone abbreviation with several meanings: `IST` (Ireland, Israel, India), `CST` (US, Cuba,
   China), `CDT` (US, Cuba), `PST` (US, Philippines)
 
-A time with no zone is read as UTC, unless `--from` names the zone it is in (on the web page, the
-"Times with no zone are in" box; on the phone page, a switch for the phone's own zone). A time the
+A time with no zone is read as UTC, unless `--from` names the zone it is in (on the web page, a
+one-click choice that appears when a time has no zone; on the phone page, a switch for the phone's
+own zone). A time the
 clocks show twice as they fall back gets both readings, and one they skip is said not to exist. A
 date with no year is read as the latest year that is not in the future. The output says each time
 which of these it assumed. A weekday written with a date is checked against it: `Monday 5 September
