@@ -5,7 +5,7 @@
 #   bash build.sh          every build, side by side (about 20 s):
 #       dist/tzdig.exe       native, from nitro's ISO C at clang -O2 -- the command-line tool
 #       web/index.html       the web page, from nitro's wasm
-#       web/mobile.html      the phone page: one timestamp in all 418 zones, grouped by UTC offset
+#       web/mobile.html      the same page, at the address phones were given before
 #       dist/tzdig.cpp       readable C++ (with nitro_rt.h), built with clang++ -O2
 #       dist/tzdig.rs        readable Rust (with nitro_rt.rs), built with rustc -O
 #       dist/tzdig.js        readable JavaScript (with node_modules/nitro_rt.js), run by node
@@ -92,7 +92,7 @@ b_web() {
     fi
     local iana; iana=$(sed -n 's/^pub fn zones_version(): return "\(.*\)"$/\1/p' src/zones.nitro)
     "$PY" tools/embed_page.py web/template.html dist/tzdig.wasm "$iana" web/index.html || bad "web page" || return 1
-    "$PY" tools/embed_page.py web/mobile_template.html dist/tzdig.wasm "$iana" web/mobile.html --doctype || bad "phone page" || return 1
+    cp web/index.html web/mobile.html || bad "phone page" || return 1       # one page for every screen
     echo "  web/index.html: $(wc -c < web/index.html) bytes, web/mobile.html: $(wc -c < web/mobile.html) bytes, IANA $iana"
 }
 b_cpp() {

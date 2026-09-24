@@ -1,6 +1,6 @@
 # tzdig
 
-**[Open tzdig in your browser](https://darpan-97.github.io/tzdig/)** · [on a phone](https://darpan-97.github.io/tzdig/mobile.html) · [download for Windows](https://github.com/darpan-97/tzdig/releases/latest/download/tzdig.exe)
+**[Open tzdig in your browser](https://darpan-97.github.io/tzdig/)** (phones too) · [download for Windows](https://github.com/darpan-97/tzdig/releases/latest/download/tzdig.exe)
 
 Convert timestamps between formats and time zones. Give it a value or a whole log, and get UTC and
 the local time in any zone, with the daylight-saving rules for that date.
@@ -19,9 +19,9 @@ It runs locally and never uses the network.
 
 - **Windows:** `tzdig.exe` from [Releases](https://github.com/darpan-97/tzdig/releases). One file,
   nothing to install. It is not code-signed, so Windows may warn the first time it runs.
-- **Browser:** [darpan-97.github.io/tzdig](https://darpan-97.github.io/tzdig/), or
-  [mobile.html](https://darpan-97.github.io/tzdig/mobile.html) on a phone. Each page is one file
-  that runs in the browser; saved to disk (`web/`), it works offline.
+- **Browser, phone included:** [darpan-97.github.io/tzdig](https://darpan-97.github.io/tzdig/). One
+  page that runs in the browser; saved to disk (`web/index.html`), it works offline. Its "All places"
+  button shows a moment in every time zone on the planet, one row per UTC offset.
 
 ## Use
 
@@ -67,13 +67,12 @@ When a value can be read more than one way, every reading is shown:
   China), `CDT` (US, Cuba), `PST` (US, Philippines)
 
 A time with no zone is read as UTC, unless `--from` names the zone it is in (on the web page, a
-one-click choice that appears when a time has no zone; on the phone page, a switch for the phone's
-own zone). A time the
-clocks show twice as they fall back gets both readings, and one they skip is said not to exist. A
-date with no year is read as the latest year that is not in the future. The output says each time
-which of these it assumed. A weekday written with a date is checked against it: `Monday 5 September
-2026` is read, and the output says that date is a Saturday. Not read: a date without a time, a time without a date, relative times
-("5 minutes ago") and month names in other languages.
+one-click choice that appears when a time has no zone). A time the clocks show twice as they fall
+back gets both readings, and one they skip is said not to exist. A date with no year is read as the
+latest year that is not in the future. The output says each time which of these it assumed. A
+weekday written with a date is checked against it: `Monday 5 September 2026` is read, and the
+output says that date is a Saturday. Not read: a date without a time, a time without a date,
+relative times ("5 minutes ago") and month names in other languages.
 
 ## Zones
 

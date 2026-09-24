@@ -68,6 +68,15 @@
   .tries { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
   .tries button { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
   .tries .spacer { flex: 1; }
+  main > *, .paste > * { min-width: 0; }     /* a row that scrolls must not widen the page to fit it */
+  .triesbar { display: flex; gap: 8px; align-items: center; }
+  .triesbar .tries { flex: 1; min-width: 0; }
+  @media (max-width: 620px) {                /* one row to swipe, not six stacked; Clear stays in view */
+    .triesbar .tries { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+    .triesbar .tries::-webkit-scrollbar { display: none; }
+    .tries button { flex: none; }
+    .tries .spacer { display: none; }
+  }
 
   /* where to show it */
   .places { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -143,6 +152,16 @@
     .row .z { grid-column: 2 / 4; grid-row: 3; }
     .row .copy { grid-column: 3; grid-row: 2; }
   }
+  /* All places: one row per UTC offset, the places that keep it underneath */
+  .row .names { grid-column: 1 / -1; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; margin-top: -2px; }
+  .row.here { box-shadow: inset 3px 0 0 var(--accent); }
+  /* fingers, not a mouse pointer: bigger things to press */
+  @media (pointer: coarse) {
+    button { padding: 8px 12px; font-size: 14px; }
+    .chip { padding: 5px 4px 5px 12px; }
+    .chip button { padding: 4px 8px; }
+    .picker input { padding: 8px 14px; }
+  }
   pre.raw { margin: 0; padding: 12px; background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; }
 
   details.more { color: var(--muted); font-size: 14px; }
@@ -168,7 +187,7 @@
   <section class="paste">
     <label class="lbl" for="input">Timestamp or log <span id="exampleTag" class="tag" hidden>example: paste your own</span></label>
     <textarea id="input" spellcheck="false" autocomplete="off" placeholder="1727104445123, 2024-09-23 11:14:05 -0400, Sep 23 15:27:40, an email header, a JSON event..."></textarea>
-    <div class="tries" id="tries"><span>Try:</span><span class="spacer"></span><button id="clear" type="button">Clear</button></div>
+    <div class="triesbar"><div class="tries" id="tries"><span>Try:</span><span class="spacer"></span></div><button id="clear" type="button">Clear</button></div>
   </section>
 
   <section class="places" aria-label="Places to show">
@@ -180,6 +199,7 @@
         role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="found" aria-label="Add a place">
       <ul id="found" role="listbox" aria-label="Countries and places" hidden></ul>
     </div>
+    <button id="every" type="button" aria-pressed="false" title="Every time zone on the planet, grouped by UTC offset">All places</button>
   </section>
 
   <section id="ask" class="ask" hidden aria-live="polite">
@@ -296,6 +316,7 @@ const cityOf = (zone) => zone.slice(zone.lastIndexOf("/") + 1).replace(/_/g, " "
 const fold = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();   // "Côte" -> "cote"
 let places = null;
 let zoneIndex = new Map();                 // IANA name -> { code, city, country }
+let allCodes = "";                         // every country code, for All places
 function loadPlaces() {
   if (!places) {
     places = runTzdig("#tzdig --zones --json\n").then((text) => {
@@ -313,6 +334,7 @@ function loadPlaces() {
         }
       }
       for (const p of list) { p.hay = fold(p.hay); p.words = p.hay.split(/[^a-z0-9]+/).filter(Boolean); }
+      allCodes = list.filter((p) => p.country).map((p) => p.code).join(",");
       return list;
     });
     places.catch(() => { places = null; });
@@ -516,6 +538,34 @@ function unlikely(r) {
   return NUMBER.has(r.format) && !(p && p.y >= 1990 && p.y <= 2040);
 }
 
+// All places: every zone of the reading, one row per UTC offset, west to east, with the places that
+// keep that offset underneath; the offset holding one of your places, or this device's, is marked
+function offsetMins(o) {
+  const m = /^([+-])(\d\d):(\d\d)$/.exec(o || "");
+  return m ? (m[1] === "-" ? -1 : 1) * (+m[2] * 60 + +m[3]) : 0;
+}
+function offsetRows(r) {
+  const mine = new Set(chips.map((c) => c.zone).filter(Boolean));
+  if (deviceZone) mine.add(deviceZone);
+  const by = new Map();
+  for (const z of r.zones) {
+    if (!z.time) continue;
+    let g = by.get(z.offset);
+    if (!g) { g = { offset: z.offset, time: z.time, abbr: new Set(), names: [], here: false }; by.set(z.offset, g); }
+    const a = realAbbr(z.abbreviation);
+    if (a) g.abbr.add(a);
+    g.names.push(placeLabel(z));
+    if (mine.has(z.zone)) g.here = true;
+  }
+  return [...by.values()].sort((a, b) => offsetMins(a.offset) - offsetMins(b.offset)).map((g) => {
+    const label = offLabel(g.offset);
+    const abbr = [...g.abbr].join(", ");
+    const x = row(g.here ? "here" : "", label, g.time, abbr, g.time.replace("T", " ") + " " + (abbr || label));
+    x.append(el("span", "names", g.names.join(", ")));
+    return x;
+  });
+}
+
 const picked = new Map();                  // card number -> which reading is shown
 function card(f, i) {
   const c = el("article", "card");
@@ -554,6 +604,11 @@ function card(f, i) {
   const rows = el("div", "rows");
   const u = r.utc.replace(/Z$/, "");
   rows.append(row("utc", "UTC", u, "", u.replace("T", " ") + " UTC"));
+  if (everyPlace) {
+    rows.append(...offsetRows(r));
+    c.append(rows);
+    return c;
+  }
   for (const z of r.zones) {
     const label = placeLabel(z);
     if (!z.time) { rows.append(row("", label, "", "no zone rules for this year (1970 to 2069)", label)); continue; }
@@ -567,12 +622,15 @@ function card(f, i) {
 
 // ---- running it ----------------------------------------------------------------------------------
 let fromZone = "";                         // "" for UTC, or a name --from reads
+let everyPlace = false;                    // All places: every zone, one row per UTC offset
 let view = "cards";
 let found = [], messages = [], raw = "";
 
 function optionsLine() {
   let line = "#tzdig";
-  if (chips.length) line += " --in " + chips.map((c) => c.value.replace(/\s+/g, "_")).join(",");
+  const names = chips.map((c) => c.value.replace(/\s+/g, "_"));
+  if (everyPlace && allCodes) names.push(allCodes);
+  if (names.length) line += " --in " + names.join(",");
   if (fromZone) line += " --from " + fromZone.replace(/\s+/g, "_");
   if ($("all").checked) line += " --all";
   if (view !== "text") line += " --json";
@@ -666,6 +724,12 @@ for (const [label, value] of TRIES) {
 $("clear").addEventListener("click", () => { $("input").value = ""; $("exampleTag").hidden = true; picked.clear(); update(); $("input").focus(); });
 $("input").addEventListener("input", () => { $("exampleTag").hidden = true; picked.clear(); soon(); });
 $("all").addEventListener("change", () => { picked.clear(); update(); });     // not remembered: off on every visit
+$("every").addEventListener("click", () => {
+  everyPlace = !everyPlace;
+  store.set("every", everyPlace ? "1" : "");
+  $("every").setAttribute("aria-pressed", everyPlace ? "true" : "false");
+  update();
+});
 $("view").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
   view = b.dataset.view; store.set("view", view); drawView(); update();
 }));
@@ -677,6 +741,8 @@ if (!Array.isArray(chips)) {               // first visit, or the old comma-sepa
   chips = old.map((z) => ({ value: z, label: z, zones: 0 }));
 }
 fromZone = store.get("from") || "";
+everyPlace = store.get("every") === "1";
+$("every").setAttribute("aria-pressed", everyPlace ? "true" : "false");
 view = ["cards", "text", "json"].includes(store.get("view")) ? store.get("view") : "cards";
 $("all").checked = false;
 store.set("all", "");                      // an older page remembered it on, which put year 6207 first
